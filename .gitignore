@@ -1,0 +1,43 @@
+# ===== 编译产物 =====
+# 可执行文件（go build 生成的二进制）
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+# 用 / 锚定到根目录，避免误伤 cmd/gateway、cmd/mock 源码目录
+/gateway
+/mock
+/flowgate
+
+# go test 的测试二进制
+*.test
+
+# 覆盖率输出
+*.out
+
+# ===== Go 相关 =====
+# vendor 依赖目录（本项目用 module 模式，一般不需要）
+vendor/
+# go workspace 文件
+go.work
+go.work.sum
+
+# ===== 环境变量 / 密钥 =====
+.env
+.env.*
+*.local
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+
+# ===== 运行日志 =====
+*.log
