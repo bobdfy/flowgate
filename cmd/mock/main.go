@@ -60,9 +60,9 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	log.Println("mock upstream listening on :8081")
+	log.Println("mock upstream listening on :8091")
 
-	// 启动 HTTP 服务，监听 8081 端口，由 mux 负责请求分发。
+	// 启动 HTTP 服务，监听 8091 端口，由 mux 负责请求分发。
 	// 服务启动失败时记录致命错误并退出。
-	log.Fatal(http.ListenAndServe(":8081", mux))
+	log.Fatal(http.ListenAndServe(":8091", mux))
 }

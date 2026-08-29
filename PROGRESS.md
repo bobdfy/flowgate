@@ -16,7 +16,7 @@ V0 静态反向代理（地基）
 
 | 版本 | 定位 | 状态 |
 |---|---|---|
-| V0 | 地基 | 🔵 进行中 |
+| V0 | 地基 | ✅ 完成 |
 | V1 | 完整 MVP | ⚪ 未开始 |
 | V2 | 服务治理基础 | ⚪ 未开始 |
 | V3 | **核心完成线** | ⚪ 未开始 |
@@ -35,9 +35,9 @@ V0 静态反向代理（地基）
 - [x] 3. 写静态路由配置 `config.yaml`
 - [x] 4. 写 Mock 上游服务 `cmd/mock/main.go`（回显/慢/故障/健康）
 - [x] 5. 写网关主程序 `cmd/gateway/main.go`（ReverseProxy + 中间件）
-- [ ] 6. 装依赖 `go get gopkg.in/yaml.v3` + `go mod tidy`
-- [ ] 7. 跑起来验证（起 Mock → 起网关 → curl 转发）
-- [ ] 8. V0 验收：GET/POST 转发、body 不丢、状态码一致、超时取消、客户端断开退出
+- [x] 6. 装依赖 `go get gopkg.in/yaml.v3` + `go mod tidy`
+- [x] 7. 跑起来验证（起 Mock → 起网关 → curl 转发）
+- [x] 8. V0 验收：GET/POST 转发、body 不丢、状态码一致、超时取消、客户端断开退出
 
 ---
 
