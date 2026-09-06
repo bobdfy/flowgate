@@ -1,9 +1,0 @@
-routes:
-  - path: /api/
-    upstream: http://localhost:8091
-  - path: /slow
-    upstream: http://localhost:8091
-  - path: /fail
-    upstream: http://localhost:8091
-  - path: /health
-    upstream: http://localhost:8091
