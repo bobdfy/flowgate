@@ -3,10 +3,8 @@ package gateway
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"strings"
 	"sync"
@@ -27,62 +25,110 @@ func parseUpstream(addr string) (*url.URL, error) {
 	return u, nil
 }
 
-// ProxyCache 按"上游地址 + 超时配置"缓存 proxy，刷新时复用，避免反复新建 Transport。(缓存)
+// ProxyCache 按"上游地址 + 超时配置"缓存 Tranport，刷新时复用，避免反复新建 Transport。(缓存)
 type ProxyCache struct {
 	mu sync.Mutex
-	m  map[string]*httputil.ReverseProxy
+	m  map[string]*http.Transport
 }
 
 // NewProxyCache 创建一个空的 ProxyCache。
 func NewProxyCache() *ProxyCache {
-	return &ProxyCache{m: map[string]*httputil.ReverseProxy{}}
+	return &ProxyCache{m: map[string]*http.Transport{}}
 }
 
-// get 返回与"地址 + 超时"对应的 proxy，不存在则新建并缓存。
-func (c *ProxyCache) get(u *url.URL, svc model.Service) *httputil.ReverseProxy {
-	key := fmt.Sprintf("%s|%d|%d", u.String(), svc.ConnectTimeoutMs, svc.RequestTimeoutMs)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if p, ok := c.m[key]; ok {
-		return p
-	}
-	p := newProxy(u, svc)
-	c.m[key] = p
-	return p
-}
-
-// newProxy 为一个上游地址构造反向代理。
-// 它封装了"单次转发"所需的连接与超时控制，后续版本的重试/熔断将在此之外包一层治理逻辑。
-func newProxy(target *url.URL, svc model.Service) *httputil.ReverseProxy {
+// 构建带超时的Tranport
+func newTransport(svc model.Service) *http.Transport {
 	connect := time.Duration(svc.ConnectTimeoutMs) * time.Millisecond
 	if connect <= 0 {
 		connect = 3 * time.Second
 	}
 
-	respHeader := time.Duration(svc.RequestTimeoutMs) * time.Millisecond
-	if respHeader <= 0 {
-		respHeader = 10 * time.Second
-	}
-
-	// 底层连接与超时控制
-	transport := &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: connect}).DialContext, // 建连超时
-		ResponseHeaderTimeout: respHeader,                                  // 等待响应头超时
+	return &http.Transport{
+		DialContext: (&net.Dialer{Timeout: connect}).DialContext, // 建连超时(TCP 三次握手)
+		// 空闲连接保活
 		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: time.Duration(svc.ResponseHeaderTimeoutMs) * time.Millisecond,
 	}
 
-	return &httputil.ReverseProxy{
-		// Director 修改请求目标：把请求重定向到上游地址
-		Director: func(req *http.Request) {
-			req.URL.Scheme = target.Scheme
-			req.URL.Host = target.Host
-			req.Host = target.Host
-		},
-		Transport: transport,
-		// 上游出错（连接失败、超时等）时的兜底处理
-		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			log.Printf("代理错误: %v", err)
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		},
+}
+
+// 按 key(`地址|connect_timeout`)查缓存，命中返回，未命中调用 `newTransport` 构造并缓存。
+func (c *ProxyCache) get(u *url.URL, svc model.Service) *http.Transport {
+	key := fmt.Sprintf("%s|%d|%d", u.String(), svc.ConnectTimeoutMs, svc.ResponseHeaderTimeoutMs)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if t, ok := c.m[key]; ok {
+		return t
+	}
+	t := newTransport(svc)
+	c.m[key] = t
+	return t
+}
+
+// 执行一次上游请求, 返回完整的响应
+// 调用方拿到 (resp, body, err) 后自行决定是否重试、何时 flush 给客户端。
+//
+// 为什么不直接用 ReverseProxy.ServeHTTP:
+//
+//	ReverseProxy 拿到响应后立刻流式写给客户端，写了就没法重试。
+//	这里先 RoundTrip + 缓冲 body，把「重试决策」和「响应输出」解耦
+func forwardOnce(transport *http.Transport, req *http.Request, target *url.URL) (*http.Response, error) {
+	outReq := req.Clone(req.Context())
+
+	outReq.RequestURI = ""
+
+	outReq.URL.Scheme = target.Scheme
+	outReq.URL.Host = target.Host
+	outReq.Host = target.Host
+
+	removeByHopHeaders(outReq.Header)
+
+	resp, err := transport.RoundTrip(outReq)
+	if err != nil {
+		return nil, err
+	}
+
+	// 缓冲 body, 重试决策需要先拿到完整响应
+	// body, err := io.ReadAll(resp.Body)
+	// if err != nil {
+	// 	return nil, nil, err
+	// }
+	// resp.Body.Close()
+
+	return resp, nil
+}
+
+func removeByHopHeaders(h http.Header) {
+	// 先处理 Connection 头里点名的 header（这些也是 hop-by-hop）
+	for _, f := range h["Connection"] {
+		for sf := range strings.SplitSeq(f, ",") {
+			if sf = strings.TrimSpace(sf); sf != "" {
+				h.Del(sf)
+			}
+		}
+	}
+
+	hopHeaders := []string{
+		"Connection",
+		"Proxy-Connection",
+		"Keep-Alive",
+		"Proxy-Authenticate",
+		"Proxy-Authorization",
+		"TE",
+		"Trailer",
+		"Transfer-Encoding",
+		"Upgrade",
+	}
+	for _, key := range hopHeaders {
+		h.Del(key)
+	}
+}
+
+// copyHeader 把 src 的 header 拷到 dst（用 Add 追加，不覆盖 dst 已有的同名字段）。
+func copyHeader(dst, src http.Header) {
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
 	}
 }

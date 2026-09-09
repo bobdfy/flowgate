@@ -14,6 +14,17 @@ type Service struct {
 	Enabled          bool      `json:"enabled"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
+
+	// 重试
+	MaxRetries     int    `json:"max_retries"`
+	RetryOnStatus  string `json:"retry_on_status"`
+	RetryBackoffMs int    `json:"retry_backoff_ms"`
+	// 熔断
+	CBFailureThreshold int `json:"cb_failure_threshold"`
+	CBCooldownMs       int `json:"cb_cooldown_ms"`
+	CBHalfOpenLimit    int `json:"cb_half_open_limit"`
+	// 超时
+	ResponseHeaderTimeoutMs int `json:"response_header_timeout_ms"`
 }
 
 // Node 对应表 upstream_nodes（上游实例）。

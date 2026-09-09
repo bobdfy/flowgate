@@ -4,8 +4,7 @@ package middleware
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -49,21 +48,19 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
-// Logging 记录每个请求的方法、路径、状态码和耗时，JSON 一行一条。
+// Logging 记录每个请求的方法、路径、状态码和耗时（结构化，与网关其他日志统一）。
 func Logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
 
-		entry := map[string]any{
-			"method":      r.Method,
-			"path":        r.URL.Path,
-			"status":      rec.status,
-			"duration_ms": time.Since(start).Milliseconds(),
-			"request_id":  r.Header.Get("X-Request-ID"),
-		}
-		b, _ := json.Marshal(entry)
-		log.Println(string(b))
+		slog.Info("access_log",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rec.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"request_id", r.Header.Get("X-Request-ID"),
+		)
 	})
 }

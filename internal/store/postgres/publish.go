@@ -234,7 +234,9 @@ func computeHash(services []model.Service, routes []model.Route, nodes []model.N
 // listServicesTx 在事务内读取所有服务。
 func listServicesTx(ctx context.Context, tx pgx.Tx) ([]model.Service, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT id, name, protocol, connect_timeout_ms, request_timeout_ms, enabled, created_at, updated_at
+		`SELECT id, name, protocol, connect_timeout_ms, request_timeout_ms, enabled,
+		        max_retries, retry_on_status, retry_backoff_ms, cb_failure_threshold, cb_cooldown_ms, cb_half_open_limit,
+		        created_at, updated_at, response_header_timeout_ms
 		 FROM gateway_services ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -243,7 +245,9 @@ func listServicesTx(ctx context.Context, tx pgx.Tx) ([]model.Service, error) {
 	var out []model.Service
 	for rows.Next() {
 		var s model.Service
-		if err := rows.Scan(&s.ID, &s.Name, &s.Protocol, &s.ConnectTimeoutMs, &s.RequestTimeoutMs, &s.Enabled, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		if err := rows.Scan(&s.ID, &s.Name, &s.Protocol, &s.ConnectTimeoutMs, &s.RequestTimeoutMs, &s.Enabled,
+			&s.MaxRetries, &s.RetryOnStatus, &s.RetryBackoffMs, &s.CBFailureThreshold, &s.CBCooldownMs, &s.CBHalfOpenLimit,
+			&s.CreatedAt, &s.UpdatedAt, &s.ResponseHeaderTimeoutMs); err != nil {
 			return nil, err
 		}
 		out = append(out, s)

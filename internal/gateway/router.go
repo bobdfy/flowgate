@@ -93,6 +93,7 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 				pool = loadbalance.NewNodePool(specs)
 				pools[route.ServiceID] = pool
 			}
+			pool.SetCBConfig(svc.CBFailureThreshold, svc.CBCooldownMs, svc.CBHalfOpenLimit)
 
 			lb := loadbalance.NewRoundRobin(pool)
 			backend = &Backend{svc: svc, lb: lb, pool: pool, proxyCache: cache}

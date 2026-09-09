@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,6 +22,9 @@ import (
 
 func main() {
 	godotenv.Load()
+
+	// 结构化日志：JSON 输出到 stdout
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -69,9 +73,17 @@ func main() {
 	hcCtx, hcCancel := context.WithCancel(context.Background())
 	defer hcCancel()
 
-	for _, pool := range pools {
-		go loadbalance.NewHealthChecker(pool).Start(hcCtx)
+	//记录已启动的健康检查的池
+	started := map[int64]bool{}
+	startCheckers := func() {
+		for sid, pool := range pools {
+			if !started[sid] {
+				go loadbalance.NewHealthChecker(pool).Start(hcCtx)
+				started[sid] = true
+			}
+		}
 	}
+	startCheckers()
 
 	// 每 5 秒刷新一次路由表。
 	go func() {
@@ -86,6 +98,8 @@ func main() {
 				continue
 			}
 			router.Swap(table)
+			startCheckers()
+			lastVersion = ver
 			log.Println("路由刷新成功")
 		}
 	}()

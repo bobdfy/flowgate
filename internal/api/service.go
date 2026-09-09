@@ -10,6 +10,26 @@ import (
 	"github.com/bobdfy/flowgate/internal/model"
 )
 
+// applyServiceDefaults 给「0/空 表示用默认值」的字段填上默认值。
+// 注意：max_retries=0（不重试）和 retry_on_status=""（只重试传输错误）本身是合法值，不填默认。
+func applyServiceDefaults(svc *model.Service) {
+	if svc.RetryBackoffMs <= 0 {
+		svc.RetryBackoffMs = 100
+	}
+	if svc.CBFailureThreshold <= 0 {
+		svc.CBFailureThreshold = 5
+	}
+	if svc.CBCooldownMs <= 0 {
+		svc.CBCooldownMs = 10000
+	}
+	if svc.CBHalfOpenLimit <= 0 {
+		svc.CBHalfOpenLimit = 1
+	}
+	if svc.ResponseHeaderTimeoutMs <= 0 {
+		svc.ResponseHeaderTimeoutMs = 5000
+	}
+}
+
 // CreateService 处理 POST /api/v1/services
 // 请求体：{"name":"...","protocol":"...","connect_timeout_ms":...,"request_timeout_ms":...,"enabled":...}
 func (h *Handler) CreateService(w http.ResponseWriter, r *http.Request) {
@@ -24,6 +44,8 @@ func (h *Handler) CreateService(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+
+	applyServiceDefaults(&svc)
 
 	if err := h.services.Create(r.Context(), &svc); err != nil {
 		log.Println("create service error", err)
@@ -86,6 +108,8 @@ func (h *Handler) UpdateService(w http.ResponseWriter, r *http.Request) {
 
 	// 关键：id 以 URL 为准，覆盖 body 里可能带的错误值
 	svc.ID = id
+
+	applyServiceDefaults(&svc)
 
 	if err := h.services.Update(r.Context(), &svc); err != nil {
 		log.Println("update service failed", err)

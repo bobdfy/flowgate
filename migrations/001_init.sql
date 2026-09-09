@@ -13,7 +13,17 @@ CREATE TABLE gateway_services (
     request_timeout_ms INTEGER      NOT NULL DEFAULT 10000,       -- 请求总超时（毫秒）
     enabled            BOOLEAN      NOT NULL DEFAULT true,        -- 是否启用
     created_at         TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT now()
+    updated_at         TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    -- 重试
+    max_retries          INTEGER      NOT NULL DEFAULT 0,
+    retry_on_status      VARCHAR(255) NOT NULL DEFAULT '',
+    retry_backoff_ms     INTEGER      NOT NULL DEFAULT 100,
+    -- 熔断
+    cb_failure_threshold INTEGER      NOT NULL DEFAULT 5,
+    cb_cooldown_ms       INTEGER      NOT NULL DEFAULT 10000,
+    cb_half_open_limit   INTEGER      NOT NULL DEFAULT 1,
+    -- 超时
+    response_header_timeout_ms INTEGER NOT NULL DEFAULT 5000
 );
 
 -- 2. upstream_nodes —— 上游实例
@@ -21,10 +31,10 @@ CREATE TABLE gateway_services (
 CREATE TABLE upstream_nodes (
     id           BIGSERIAL PRIMARY KEY,
     service_id   BIGINT       NOT NULL REFERENCES gateway_services(id) ON DELETE CASCADE, -- 属于哪个服务
-    address      VARCHAR(255) NOT NULL,                                                  -- 地址，如 localhost:8091
-    weight       INTEGER      NOT NULL DEFAULT 1,                                        -- 权重（V2 负载均衡用）
-    enabled      BOOLEAN      NOT NULL DEFAULT true,                                     -- 是否启用
-    health_status VARCHAR(20) NOT NULL DEFAULT 'unknown',                                -- 健康状态（V2 健康检查用）：unknown/healthy/unhealthy
+    address      VARCHAR(255) NOT NULL,                -- 地址，如 localhost:8091
+    weight       INTEGER      NOT NULL DEFAULT 1,      -- 权重
+    enabled      BOOLEAN      NOT NULL DEFAULT true,   -- 是否启用
+    health_status VARCHAR(20) NOT NULL DEFAULT 'unknown', -- 健康状态 :unknown/healthy/unhealthy
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
@@ -33,24 +43,25 @@ CREATE TABLE upstream_nodes (
 --    决定哪个路径转发到哪个服务。
 CREATE TABLE gateway_routes (
     id              BIGSERIAL PRIMARY KEY,
-    service_id      BIGINT       NOT NULL REFERENCES gateway_services(id),              -- 转发到哪个服务
-    name            VARCHAR(255) NOT NULL,                                              -- 路由名
-    path_pattern    VARCHAR(255) NOT NULL,                                              -- 路径匹配，如 /api/
-    path_match_type VARCHAR(20)  NOT NULL DEFAULT 'prefix',                             -- 匹配类型：prefix / exact
-    methods         VARCHAR(255) NOT NULL DEFAULT 'GET,POST,PUT,DELETE',                -- 允许的方法，逗号分隔
-    enabled         BOOLEAN      NOT NULL DEFAULT true,                                 -- 是否启用
+    service_id      BIGINT       NOT NULL REFERENCES gateway_services(id), -- 转发到哪个服务
+    name            VARCHAR(255) NOT NULL,          -- 路由名
+    path_pattern    VARCHAR(255) NOT NULL,          -- 路径匹配，如 /api/
+    path_match_type VARCHAR(20)  NOT NULL DEFAULT 'prefix', -- 匹配类型：prefix / exact
+    methods         VARCHAR(255) NOT NULL DEFAULT 'GET,POST,PUT,DELETE',  -- 允许的方法，逗号分隔
+    enabled         BOOLEAN      NOT NULL DEFAULT true,     -- 是否启用
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    host VARCHAR(255) NOT NULL DEFAULT ''
 );
 
 -- 4. route_versions —— 配置版本
 --    配置的"版本化"，每次发布生成一个新版本，可回滚。
 CREATE TABLE route_versions (
     id           BIGSERIAL PRIMARY KEY,
-    version      INTEGER      NOT NULL UNIQUE,                       -- 版本号，递增
-    status       VARCHAR(20)  NOT NULL DEFAULT 'draft',       -- 状态：draft（草稿）/ published（已发布）
-    config_hash  VARCHAR(64),                                 -- 整版配置的哈希，用于校验一致性
-    published_at TIMESTAMPTZ,                                 -- 发布时间（草稿时为空）
+    version      INTEGER      NOT NULL UNIQUE,          -- 版本号，递增
+    status       VARCHAR(20)  NOT NULL DEFAULT 'draft', -- 状态：draft（草稿）/ published（已发布）
+    config_hash  VARCHAR(64),                           -- 整版配置的哈希，用于校验一致性
+    published_at TIMESTAMPTZ,                           -- 发布时间（草稿时为空）
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
@@ -59,9 +70,9 @@ CREATE TABLE route_versions (
 CREATE TABLE route_version_items (
     id                BIGSERIAL PRIMARY KEY,
     version_id        BIGINT      NOT NULL REFERENCES route_versions(id) ON DELETE CASCADE, -- 属于哪个版本
-    resource_type     VARCHAR(20) NOT NULL,                                                -- 资源类型：service / node / route
-    resource_id       BIGINT      NOT NULL,                                                -- 资源 ID
-    resource_snapshot JSONB       NOT NULL                                                 -- 该资源的完整快照（JSON）
+    resource_type     VARCHAR(20) NOT NULL,     -- 资源类型：service / node / route
+    resource_id       BIGINT      NOT NULL,     -- 资源 ID
+    resource_snapshot JSONB       NOT NULL      -- 该资源的完整快照（JSON）
 );
 
 -- 索引：加速按服务查实例、按版本查条目
