@@ -18,6 +18,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// main 是管理服务进程入口：解析参数、连接数据库、注册管理 API 路由，最后启动 HTTP 服务并等待退出信号。
 func main() {
 	// 加载 .env（与 gateway 保持一致）
 	godotenv.Load()

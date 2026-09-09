@@ -22,6 +22,7 @@ type ValidationError struct {
 	msg string
 }
 
+// Error 返回校验失败的描述信息，实现 error 接口。
 func (e *ValidationError) Error() string {
 	return e.msg
 }

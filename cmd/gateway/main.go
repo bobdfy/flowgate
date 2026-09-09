@@ -20,6 +20,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// main 是网关进程入口：加载配置、连接数据库、构建并周期性刷新路由表，最后启动 HTTP 服务并等待退出信号。
 func main() {
 	godotenv.Load()
 
@@ -85,7 +86,7 @@ func main() {
 	}
 	startCheckers()
 
-	// 每 5 秒刷新一次路由表。
+	// 每 5 秒检查一次路由表, 发生改变就刷新
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		for range ticker.C {

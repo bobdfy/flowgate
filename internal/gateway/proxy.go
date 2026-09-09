@@ -88,16 +88,10 @@ func forwardOnce(transport *http.Transport, req *http.Request, target *url.URL) 
 		return nil, err
 	}
 
-	// 缓冲 body, 重试决策需要先拿到完整响应
-	// body, err := io.ReadAll(resp.Body)
-	// if err != nil {
-	// 	return nil, nil, err
-	// }
-	// resp.Body.Close()
-
 	return resp, nil
 }
 
+// removeByHopHeaders 删除请求头中逐跳（hop-by-hop）的字段，防止它们被代理转发到上游。
 func removeByHopHeaders(h http.Header) {
 	// 先处理 Connection 头里点名的 header（这些也是 hop-by-hop）
 	for _, f := range h["Connection"] {

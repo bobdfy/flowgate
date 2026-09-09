@@ -13,6 +13,7 @@ import (
 	"time"
 )
 
+// main 启动 mock 模拟上游服务，注册回显/慢响应/故障/健康检查等测试接口并开始监听。
 func main() {
 	addr := flag.String("addr", ":8091", "mock监听地址")
 	flag.Parse()

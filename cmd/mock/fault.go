@@ -24,6 +24,7 @@ type faultStore struct {
 	rules map[string]faultRule // key = 路径
 }
 
+// newFaultStore 创建一个空的故障规则表。
 func newFaultStore() *faultStore {
 	return &faultStore{rules: map[string]faultRule{}}
 }

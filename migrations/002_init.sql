@@ -1,1 +1,0 @@
-ALTER TABLE gateway_routes ADD COLUMN host VARCHAR(255) NOT NULL DEFAULT '';

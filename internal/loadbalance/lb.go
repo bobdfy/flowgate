@@ -37,6 +37,7 @@ type NodePool struct {
 	CBHalfOpenLimit    int // 熔断：HalfOpen 态最多同时放几个试探请求
 }
 
+// SetCBConfig 设置熔断参数（连续失败阈值、冷却时长、半开试探上限），非正值参数用默认值兜底。
 func (p *NodePool) SetCBConfig(failurethreshold int, cooldownMs int, halfOpeninflight int) {
 	if failurethreshold <= 0 {
 		failurethreshold = 5
@@ -71,6 +72,7 @@ func NewNodePool(specs []NodeSpec) *NodePool {
 	return pool
 }
 
+// AvailableNodes 返回当前可派发的健康节点列表；对冷却已到期的 Open 节点惰性转入 HalfOpen 并放行试探请求。
 func (p *NodePool) AvailableNodes() []*NodeState {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -159,6 +159,7 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		"duration_ms", time.Since(start).Milliseconds())
 }
 
+// parseRetryStatus 把 "502,503" 这类逗号分隔的状态码串解析成状态码集合，用于判断哪些响应码值得重试。
 func parseRetryStatus(s string) map[int]bool {
 	if s == "" {
 		return make(map[int]bool)
@@ -182,6 +183,7 @@ func parseRetryStatus(s string) map[int]bool {
 	return statusSet
 }
 
+// isSafeMethod 判断 HTTP 方法是否安全（幂等），只有安全方法才允许在失败后自动重试。
 func isSafeMethod(method string) bool {
 	if method == "GET" || method == "HEAD" || method == "PUT" || method == "DELETE" {
 		return true
@@ -191,7 +193,7 @@ func isSafeMethod(method string) bool {
 }
 
 // sleepBackoff 指数退避 + 抖动：第 attempt 次重试的基准延迟 = baseMs × 2^attempt，封顶 backoffMax，
-// 再在 [delay/4, delay) 内随机（全抖动），避免多个客户端同时重试把上游打爆。
+// 再在 [delay/4, delay) 内随机，避免多个客户端同时重试把上游打爆。
 // 返回 (是否睡满一轮, 实际延迟)：false 表示期间 ctx 已取消，调用方应停止重试。
 func sleepBackoff(ctx context.Context, baseMs, attempt int) (bool, time.Duration) {
 	delay := time.Duration(baseMs) * time.Millisecond
