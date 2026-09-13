@@ -6,7 +6,10 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
+
+	"github.com/bobdfy/flowgate/internal/observability"
 )
 
 // RequestID 为每个请求生成或透传 Request ID。
@@ -62,5 +65,10 @@ func Logging(next http.Handler) http.Handler {
 			"duration_ms", time.Since(start).Milliseconds(),
 			"request_id", r.Header.Get("X-Request-ID"),
 		)
+
+		duration := time.Since(start)
+		status := strconv.Itoa(rec.status)
+		observability.RequestDuration.WithLabelValues(r.Method, r.URL.Path, status).Observe(duration.Seconds())
+		observability.RequestTotal.WithLabelValues(r.Method, r.URL.Path, status).Inc()
 	})
 }

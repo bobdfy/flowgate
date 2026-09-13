@@ -45,6 +45,9 @@ func (h *HealthChecker) Start(ctx context.Context) {
 // 注意：必须包含不健康的节点——不健康的也要继续探测，才能发现它恢复了。
 func (h *HealthChecker) checkOnce() {
 	for _, node := range h.pool.AllNodes() {
+		if node.State == StateOpen && time.Now().Before(node.OpenUntil) {
+			continue
+		}
 		h.checkNode(node)
 	}
 }

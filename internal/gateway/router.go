@@ -85,7 +85,6 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 		// 同一服务的多个路由复用同一个 Backend（游标状态要共享）
 		backend, ok := backends[route.ServiceID]
 		if !ok {
-
 			pool, hasPool := pools[route.ServiceID]
 			if hasPool {
 				pool.SyncNodes(specs)

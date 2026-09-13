@@ -192,6 +192,36 @@ FlowGate 不建议宣称“所有请求绝不丢失”或“所有请求 Exactly
 
 # 5. 项目版本路线
 
+> **当前进度（截至 2026-09-11）**：V0～V3 已完成并验证；V4 进行中（身份层、本地令牌桶、Redis+Lua 滑窗、故障回退已实现，按身份 QPS 与压测/观测未完成）；V5/V6 未开始。
+
+| 版本 | 定位 | 状态 |
+|---|---|---|
+| V0 | 静态反向代理 | ✅ 完成 |
+| V1 | 可配置网关 MVP（PostgreSQL + 发布/回滚） | ✅ 完成 |
+| V2 | 负载均衡 / 健康检查 / 动态路由 | ✅ 完成 |
+| V3 | 超时 / 重试 / 熔断 | ✅ 核心完成并验证（可观测性 / 过载保护 / Bulkhead 未做） |
+| V4 | 分布式限流 / Redis 故障回退 / pprof | ⏳ 进行中 |
+| V5 | OpenAI 兼容 / Provider / SSE | 未开始 |
+| V6 | 控制面 / 数据面 / K8s | 未开始 |
+
+### V4 细项进度
+
+已完成：
+
+- 身份层：`tenants` + `api_keys` 表、`X-API-Key` 鉴权、key 只存 SHA256 哈希（明文仅发放时返回一次）
+- 本地 Token Bucket（手写，含空闲桶 GC）
+- Redis + Lua 滑动窗口（`ZREMRANGEBYSCORE` + `ZCARD` + `ZADD` + `PEXPIRE`）
+- 故障回退 `FallbackLimiter`：Fail-Closed / Fail-Fallback / Fail-Open 三模式
+- 中间件链：`RequestID → Logging → 鉴权 → 租户限流 → API Key 限流 → 路由`
+
+待完成：
+
+- 按身份的 QPS（当前 qps/burst 为全局硬编码，`tenants` / `api_keys` 表尚无 `qps_limit` 列）
+- `FallbackLimiter` 实现 `RetryAfter`（当前 429 丢失 Retry-After 头）
+- 多实例共享额度验证
+- Prometheus 指标 + pprof + 压测报告
+- Redis 不可用 / 突发流量对比实验
+
 ## V0：最小反向代理验证版
 
 ### 目标

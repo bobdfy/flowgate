@@ -20,15 +20,19 @@ type Handler struct {
 	nodes    *postgres.NodeStore
 	routes   *postgres.RouteStore
 	versions *postgres.VersionStore
+	tenants  *postgres.TenantStore
+	apikeys  *postgres.APIKeyStore
 }
 
 // NewHandler 创建一个 Handler。
-func NewHandler(services *postgres.ServiceStore, nodes *postgres.NodeStore, routes *postgres.RouteStore, versions *postgres.VersionStore) *Handler {
+func NewHandler(services *postgres.ServiceStore, nodes *postgres.NodeStore, routes *postgres.RouteStore, versions *postgres.VersionStore, tenants *postgres.TenantStore, apikeys *postgres.APIKeyStore) *Handler {
 	return &Handler{
 		services: services,
 		nodes:    nodes,
 		routes:   routes,
 		versions: versions,
+		tenants:  tenants,
+		apikeys:  apikeys,
 	}
 }
 
@@ -62,6 +66,18 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/versions", h.ListVersions)
 	mux.HandleFunc("GET /api/v1/versions/{id}", h.GetVersion)
 	mux.HandleFunc("POST /api/v1/versions/{id}/rollback", h.Rollback)
+
+	// 租户与 API Key（V4 身份层）：
+	mux.HandleFunc("POST /api/v1/tenants", h.CreateTenant)
+	mux.HandleFunc("GET /api/v1/tenants", h.ListTenants)
+	mux.HandleFunc("GET /api/v1/tenants/{id}", h.GetTenant)
+	mux.HandleFunc("PUT /api/v1/tenants/{id}", h.UpdateTenant)
+	mux.HandleFunc("DELETE /api/v1/tenants/{id}", h.DeleteTenant)
+
+	mux.HandleFunc("POST /api/v1/tenants/{id}/keys", h.CreateAPIKey)
+	mux.HandleFunc("GET /api/v1/tenants/{id}/keys", h.ListAPIKeys)
+	mux.HandleFunc("PUT /api/v1/keys/{id}", h.UpdateAPIKey)
+	mux.HandleFunc("DELETE /api/v1/keys/{id}", h.DeleteAPIKey)
 }
 
 // writeJSON 把 v 序列化成 JSON 写入响应。

@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/bobdfy/flowgate/internal/observability"
 )
 
 // CircuitState 熔断器三态。
@@ -201,6 +203,7 @@ func (p *NodePool) RecordResult(n *NodeState, ok bool) {
 			n.State = StateClosed
 			n.Fails = 0
 			n.HalfOpenInFlight = 0
+			observability.CircuitState.WithLabelValues(n.Address).Set(1)
 			slog.Info("circuit_closed",
 				"addr", n.Address,
 				"from", from, // half_open → closed，试探成功恢复
@@ -210,6 +213,7 @@ func (p *NodePool) RecordResult(n *NodeState, ok bool) {
 			n.State = StateOpen
 			n.OpenUntil = time.Now().Add(time.Duration(p.CBCooldownMs) * time.Millisecond)
 			n.HalfOpenInFlight = 0
+			observability.CircuitState.WithLabelValues(n.Address).Set(1)
 			slog.Warn("circuit_open",
 				"addr", n.Address,
 				"from", from, // half_open → open，试探失败重开

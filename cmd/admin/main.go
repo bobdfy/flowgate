@@ -49,8 +49,10 @@ func main() {
 	nodeStore := postgres.NewNodeStore(pool)
 	routeStore := postgres.NewRouteStore(pool)
 	versionStore := postgres.NewVersionStore(pool)
+	tenantStore := postgres.NewTenantStore(pool)
+	apiKeyStore := postgres.NewAPIKeyStore(pool)
 
-	apiHandler := api.NewHandler(serviceStore, nodeStore, routeStore, versionStore)
+	apiHandler := api.NewHandler(serviceStore, nodeStore, routeStore, versionStore, tenantStore, apiKeyStore)
 
 	// 注册管理 API 路由
 	mux := http.NewServeMux()
