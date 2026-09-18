@@ -65,13 +65,25 @@ func (c *ProxyCache) get(u *url.URL, svc model.Service) *http.Transport {
 	return t
 }
 
-// 执行一次上游请求, 返回完整的响应
-// 调用方拿到 (resp, body, err) 后自行决定是否重试、何时 flush 给客户端。
-//
-// 为什么不直接用 ReverseProxy.ServeHTTP:
-//
-//	ReverseProxy 拿到响应后立刻流式写给客户端，写了就没法重试。
-//	这里先 RoundTrip + 缓冲 body，把「重试决策」和「响应输出」解耦
+// 第 1 段：这个函数做什么
+//   —— 把入站请求改造后发一次给上游，返回上游响应。★ 只发一次，不做重试。
+
+// 第 2 段：为什么不用 httputil.ReverseProxy
+//   —— ReverseProxy 拿到响应就立刻 stream 给客户端，写了就没法重试。
+//      这里只做 RoundTrip，把「响应输出」留给调用方，
+//      这样「重试决策」和「响应输出」才能解耦。
+
+// 第 3 段：★ body 的所有权（最该写清的一点）
+//   —— 本函数不读 resp.Body。读它、丢弃它、关闭它的责任都在调用方。
+//      另外调用方必须在每轮重试前重新包 req.Body（bytes.NewReader），
+//      因为 RoundTrip 会把 req.Body 读空，第二次发就是空体。
+//      这两件事都在 Backend.ServeHTTP 里做。
+
+// 第 4 段：对请求做了哪些改造
+//   —— Clone、清 RequestURI、改写 Scheme/Host、删逐跳头。
+//      ★ 注意 Host 同时改了 outReq.Host 和 outReq.URL.Host ——
+//        只改一个会让上游收到错的 Host 头（影响虚拟主机路由）。
+
 func forwardOnce(transport *http.Transport, req *http.Request, target *url.URL) (*http.Response, error) {
 	outReq := req.Clone(req.Context())
 

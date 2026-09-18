@@ -1,0 +1,37 @@
+providers:
+  # ---- 智谱（OpenAI 兼容，但路径不是 /v1/...）----
+  - name: zhipu
+    type: openai
+    endpoint: https://open.bigmodel.cn/api/paas/v4
+    upstream_path: /chat/completions
+    api_keys:
+      - ${ZHIPU_API_KEY}
+    enabled: true
+
+  # ---- DeepSeek（路径就是标准的 /v1/...，所以 upstream_path 留空）----
+  - name: deepseek
+    type: openai
+    endpoint: https://api.deepseek.com
+    api_keys:
+      - ${DEEPSEEK_API_KEY}
+    enabled: true
+
+  # ---- 本地假上游（用来测恶劣切分）----
+  - name: mockai
+    type: openai
+    endpoint: http://localhost:8095
+    api_keys: ["sk-mock"]     # 它不校验，随便填
+    enabled: true
+
+models:
+  - name: flowgate-chat
+    provider: zhipu
+    upstream_model: glm-5.3
+
+  - name: flowgate-deepseek
+    provider: deepseek
+    upstream_model: deepseek-chat
+
+  - name: flowgate-mock
+    provider: mockai
+    upstream_model: mock-gpt

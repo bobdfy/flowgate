@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/bobdfy/flowgate/internal/loadbalance"
 	"github.com/bobdfy/flowgate/internal/model"
+	"github.com/bobdfy/flowgate/internal/observability"
+	"github.com/bobdfy/flowgate/internal/overload"
 )
 
 // Backend 是一个上游服务的转发入口。
@@ -22,7 +25,8 @@ type Backend struct {
 	svc        model.Service            // 这个后端是哪个服务（含超时配置）
 	lb         loadbalance.LoadBalancer // 负载均衡器：负责「这次轮到哪个实例」
 	proxyCache *ProxyCache              // 挑中实例后，去哪拿转发用的 proxy
-	pool       *loadbalance.NodePool    //
+	pool       *loadbalance.NodePool
+	guard      *overload.Guard
 }
 
 const (
@@ -48,9 +52,27 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		node *loadbalance.NodeState
 	)
 
+	// ★ 服务级并发护栏（过载保护），位置在超时【之后】。
+	//
+	// 为什么不能放在超时之前：那样"排队等待"的时间不计入 request_timeout。
+	// 举例：request_timeout = 10s、排队等了 20s —— 位置在超时之前的话，
+	// 出队后才开始算那 10s，客户端实际等了 30s，跟承诺的 10s 对不上。
+	// 放在之后，排队 + 重试 + 转发 全程共享同一个 deadline，
+	// 这也正是 wait 策略能成立的前提。
+	release, err := b.guard.Acquire(req.Context())
+	if err != nil {
+		if rejectOverload(w, err, "service", b.svc.Name, func(reason string) {
+			observability.OverloadRejectedTotal.WithLabelValues(b.svc.Name, reason).Inc()
+		}) {
+			return
+		}
+	}
+
+	defer release()
+
 	maxRetries := b.svc.MaxRetries
 	retryOn := parseRetryStatus(b.svc.RetryOnStatus)
-	retryable := isSafeMethod(req.Method)
+	retryable := isIdempotent(req.Method)
 
 	// 缓存请求体：RoundTrip 会把 req.Body 读空，重试第二次 clone 出来就是空的，
 	// 所以先整读进内存，每轮重试前重新包 reader 发出去。
@@ -183,8 +205,8 @@ func parseRetryStatus(s string) map[int]bool {
 	return statusSet
 }
 
-// isSafeMethod 判断 HTTP 方法是否安全（幂等），只有安全方法才允许在失败后自动重试。
-func isSafeMethod(method string) bool {
+// isSafeMethod 判断 HTTP 方法是否幂等，只有安全方法才允许在失败后自动重试。
+func isIdempotent(method string) bool {
 	if method == "GET" || method == "HEAD" || method == "PUT" || method == "DELETE" {
 		return true
 	} else {
@@ -195,6 +217,15 @@ func isSafeMethod(method string) bool {
 // sleepBackoff 指数退避 + 抖动：第 attempt 次重试的基准延迟 = baseMs × 2^attempt，封顶 backoffMax，
 // 再在 [delay/4, delay) 内随机，避免多个客户端同时重试把上游打爆。
 // 返回 (是否睡满一轮, 实际延迟)：false 表示期间 ctx 已取消，调用方应停止重试。
+// 为什么是「保底 25%」而不是「全抖动 [0, delay)」（这段是新增的）
+//   —— 全抖动的打散效果最好，但可能抽出接近 0 的间隔。
+//      多个客户端同时重试时，等于没有退避：重试会在同一瞬间叠加，
+//      上游刚恢复就被第二波打挂。
+//      保底 25% 牺牲一部分打散效果，换取「任何一次重试都至少等了 delay 的 1/4」。
+//      在「重试风暴」这个具体场景里，这个保底比极致的随机更重要。
+
+// 一句话：退避的首要目的是「让上游有时间恢复」，其次才是「打散」。
+// 全抖动优化的是后者，会牺牲前者。
 func sleepBackoff(ctx context.Context, baseMs, attempt int) (bool, time.Duration) {
 	delay := time.Duration(baseMs) * time.Millisecond
 	for range attempt {
@@ -223,4 +254,36 @@ func sleepBackoff(ctx context.Context, baseMs, attempt int) (bool, time.Duration
 	case <-timer.C:
 		return true, delay
 	}
+}
+
+// ReportMetrics 把当前并发水位刷进Prometheus
+func (b *Backend) ReportMetrics() {
+	st := b.guard.Stats()
+	observability.InflightRequests.WithLabelValues(b.svc.Name).Set(float64(st.InFlight))
+	observability.QueueDepth.WithLabelValues(b.svc.Name).Set(float64(st.Queued))
+}
+
+// rejectOverload 把 overload.RejectedError 翻译为HTTP响应
+func rejectOverload(w http.ResponseWriter, err error, role, name string, inc func(reason string)) bool {
+	var rej *overload.RejectedError
+	if !errors.As(err, &rej) {
+		slog.Debug("guard_ctx_done", "role", role, "name", name, "err", err)
+		return true
+	}
+
+	if rej.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(rej.RetryAfter.Seconds()))))
+	}
+
+	if inc != nil {
+		inc(string(rej.Reason))
+	}
+	slog.Warn("overloaded",
+		"role", role,
+		"name", name,
+		"reason", rej.Reason,
+		"inflight", rej.InFlight)
+
+	http.Error(w, "overload:"+string(rej.Reason), http.StatusServiceUnavailable)
+	return true
 }

@@ -6,9 +6,12 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/bobdfy/flowgate/internal/loadbalance"
 	"github.com/bobdfy/flowgate/internal/model"
+	"github.com/bobdfy/flowgate/internal/observability"
+	"github.com/bobdfy/flowgate/internal/overload"
 )
 
 type routeEntry struct {
@@ -17,6 +20,10 @@ type routeEntry struct {
 	matchType string
 	methods   map[string]bool
 	backend   *Backend
+
+	// 路由级并发护栏
+	// 保护同一服务上的其他路由
+	guard *overload.Guard
 }
 
 // RouteTable 是路由表（有序候选列表），导出供 main 引用。
@@ -95,7 +102,11 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 			pool.SetCBConfig(svc.CBFailureThreshold, svc.CBCooldownMs, svc.CBHalfOpenLimit)
 
 			lb := loadbalance.NewRoundRobin(pool)
-			backend = &Backend{svc: svc, lb: lb, pool: pool, proxyCache: cache}
+			backend = &Backend{svc: svc, lb: lb, pool: pool, proxyCache: cache,
+				guard: overload.NewGuard(svc.MaxConcurrency,
+					overload.Strategy(svc.OverloadStrategy),
+					time.Duration(svc.QueueTimeoutMs)*time.Millisecond,
+					overload.DefaultQueueCapacity(svc.MaxConcurrency))}
 			backends[route.ServiceID] = backend
 			pools[route.ServiceID] = pool
 		}
@@ -105,6 +116,14 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 			matchType: route.PathMatchType,
 			methods:   parseMethods(route.Methods),
 			backend:   backend,
+
+			// 路由级固定fail-fast
+			guard: overload.NewGuard(
+				route.MaxConcurrency,
+				overload.StrategyFailFast,
+				0,
+				0,
+			),
 		})
 	}
 	return entries, nil
@@ -149,7 +168,19 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 		http.NotFound(w, req)
 		return
 	}
+
+	// ★ 两层护栏的获取顺序是硬约束：路由级先（外），服务级后（内）
+	release, err := best.guard.Acquire(req.Context())
+	if err != nil {
+		rejectOverload(w, err, "route", best.pattern, func(reason string) {
+			observability.BulkheadRejectedTotal.WithLabelValues(best.pattern, reason).Inc()
+		})
+		return
+	}
+	defer release()
+
 	best.backend.ServeHTTP(w, req)
+
 }
 
 // matches 判断该路由是否匹配请求（方法 + 路径都满足）。
@@ -186,4 +217,34 @@ func parseMethods(s string) map[string]bool {
 		}
 	}
 	return m
+}
+
+// Backends 返回当前路由表里的所有后端 (已去重)
+func (r *Router) Backends() []*Backend {
+	entries := r.table.Load().(RouteTable)
+	seen := map[*Backend]bool{}
+	out := make([]*Backend, 0, len(entries))
+	for _, e := range entries {
+		if seen[e.backend] {
+			continue
+		}
+		seen[e.backend] = true
+		out = append(out, e.backend)
+	}
+	return out
+}
+
+// ReportMetrics 刷新路由级并发水位。
+//
+// ★ 只刷 Gauge（水位），不刷 Counter —— Counter 在拒绝时 +1，不需要轮询。
+//
+// ★ 已知限制：如果两条路由的 path_pattern 相同（不同 host 的同名路径），
+// 它们会写同一个 label 值，后者覆盖前者。V3 范围里不处理
+// （我们的路由 pattern 是唯一的），但要知道有这个边界。
+func (r *Router) ReportMetrics() {
+	entries := r.table.Load().(RouteTable)
+	for _, e := range entries {
+		st := e.guard.Stats()
+		observability.BulkheadInflight.WithLabelValues(e.pattern).Set(float64(st.InFlight))
+	}
 }

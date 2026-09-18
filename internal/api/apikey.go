@@ -2,13 +2,13 @@ package api
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
 
+	"github.com/bobdfy/flowgate/internal/identity"
 	"github.com/bobdfy/flowgate/internal/model"
 )
 
@@ -44,7 +44,7 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
-	k.KeyHash = hashAPIKey(plain)
+	k.KeyHash = identity.HashKey(plain)
 
 	if err := h.apikeys.Create(r.Context(), &k); err != nil {
 		log.Println("create api key error", err)
@@ -126,10 +126,4 @@ func generateAPIKey() (string, error) {
 		return "", err
 	}
 	return "sk_" + hex.EncodeToString(b), nil
-}
-
-// hashAPIKey 返回 key 的 SHA256 十六进制哈希（存库用，不存明文）。
-func hashAPIKey(key string) string {
-	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])
 }

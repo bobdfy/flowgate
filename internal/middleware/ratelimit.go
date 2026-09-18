@@ -33,7 +33,7 @@ func ClientKey(r *http.Request) (string, int64) {
 // RateLimit 限流中间件：key 超限返回 429（带 Retry-After）并且不调 next；
 // 限流器自身出错（分布式实现才可能）先记日志放行，阶段 4 再接 fail_mode。
 // 位置：包在 Router 外层，但在 RequestID / Logging 内层。
-func RateLimit(limiter ratelimit.Limiter, keyFn KeyFunc, next http.Handler) http.Handler {
+func RateLimit(limiter ratelimit.Limiter, keyFn KeyFunc, next http.Handler, responder ErrorResponder) http.Handler {
 	if keyFn == nil {
 		keyFn = ClientKey
 	}
@@ -73,6 +73,10 @@ func RateLimit(limiter ratelimit.Limiter, keyFn KeyFunc, next http.Handler) http
 			)
 			// 返回 429 状态码和消息体
 			observability.RateLimitedTotal.WithLabelValues(key).Inc()
+			if responder != nil {
+				responder(w, r, http.StatusTooManyRequests, "Too Many Requests")
+				return
+			}
 			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 			return
 		}

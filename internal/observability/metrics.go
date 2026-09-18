@@ -48,6 +48,80 @@ var (
 		},
 		[]string{"addr"}, // 上游地址
 	)
+
+	// AI 流式首 token 耗时（TTFT）
+	AIStreamTTFT = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "flowgate_ai_stream_ttft_seconds",
+			Help:    "AI 流式首 token 耗时",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		},
+		[]string{"model"},
+	)
+
+	// AI 流式总耗时
+	AIStreamDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "flowgate_ai_stream_duration_seconds",
+			Help:    "AI 流式总耗时",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+
+	// AI 流式事件总数
+	AIStreamEventsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowgate_ai_stream_events_total",
+			Help: "AI 流式事件总数",
+		},
+	)
+
+	// 过载拒绝数（Counter）
+	// ★ label 用有界值：service 名有限，reason 是枚举（fail_fast / queue_full /
+	//   queue_timeout / queue_timeout_drop）。绝不能放 path / API Key。
+	OverloadRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowgate_overload_rejected_total",
+			Help: "因过载被拒绝的请求数",
+		},
+		[]string{"service", "reason"},
+	)
+
+	// 在途请求数（Gauge：看水位）
+	InflightRequests = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "flowgate_inflight_requests",
+			Help: "当前在途请求数",
+		},
+		[]string{"service"},
+	)
+
+	// 排队深度（Gauge）
+	QueueDepth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "flowgate_queue_depth",
+			Help: "当前排队深度",
+		},
+		[]string{"service"},
+	)
+
+	// 路由级过载拒绝数(Bulkhed)
+	BulkheadRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowgate_bulkhead_rejected_total",
+			Help: "因路由级并发限制被拒绝的请求数",
+		},
+		[]string{"route", "reason"},
+	)
+
+	// 路由级在途请求数 (Bulkhead 水位)
+	BulkheadInflight = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "flowgate_bulkhead_inflight_requests",
+			Help: "路由级在途请求数",
+		},
+		[]string{"route"},
+	)
 )
 
 func init() {
@@ -57,5 +131,13 @@ func init() {
 		RateLimitedTotal,
 		RateLimitDuration,
 		CircuitState,
+		AIStreamTTFT,
+		AIStreamDuration,
+		AIStreamEventsTotal,
+		OverloadRejectedTotal,
+		InflightRequests,
+		QueueDepth,
+		BulkheadInflight,
+		BulkheadRejectedTotal,
 	)
 }

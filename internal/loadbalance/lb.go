@@ -98,6 +98,7 @@ func (p *NodePool) AvailableNodes() []*NodeState {
 				slog.Info("circuit_half_open",
 					"addr", n.Address,
 					"open_duration_ms", p.CBCooldownMs)
+				observability.CircuitState.WithLabelValues(n.Address).Set(2)
 				if n.HalfOpenInFlight < p.CBHalfOpenLimit {
 					n.HalfOpenInFlight++
 					out = append(out, n)
@@ -192,6 +193,7 @@ func (p *NodePool) RecordResult(n *NodeState, ok bool) {
 				"open_until", n.OpenUntil.Format(time.RFC3339),
 				"failure_threshold", p.CBFailureThreshold,
 				"cooldown_ms", p.CBCooldownMs)
+			observability.CircuitState.WithLabelValues(n.Address).Set(1)
 		}
 	case StateHalfOpen:
 		// 释放一个试探名额
@@ -203,7 +205,7 @@ func (p *NodePool) RecordResult(n *NodeState, ok bool) {
 			n.State = StateClosed
 			n.Fails = 0
 			n.HalfOpenInFlight = 0
-			observability.CircuitState.WithLabelValues(n.Address).Set(1)
+			observability.CircuitState.WithLabelValues(n.Address).Set(0)
 			slog.Info("circuit_closed",
 				"addr", n.Address,
 				"from", from, // half_open → closed，试探成功恢复

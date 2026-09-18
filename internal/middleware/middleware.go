@@ -12,6 +12,9 @@ import (
 	"github.com/bobdfy/flowgate/internal/observability"
 )
 
+// ErrorResponder 决定「网关自己拒绝请求」时回什么 body。
+type ErrorResponder func(w http.ResponseWriter, r *http.Request, status int, msg string)
+
 // RequestID 为每个请求生成或透传 Request ID。
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

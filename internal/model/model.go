@@ -25,6 +25,12 @@ type Service struct {
 	CBHalfOpenLimit    int `json:"cb_half_open_limit"`
 	// 超时
 	ResponseHeaderTimeoutMs int `json:"response_header_timeout_ms"`
+	// ★ MaxConcurrency = 0 表示不限流，保持改造前行为。
+	MaxConcurrency int `json:"max_concurrency"`
+	// QueueTimeoutMs 是 wait 策略下的排队上限；0 表示不排队。
+	QueueTimeoutMs int `json:"queue_timeout_ms"`
+	// OverloadStrategy 取值 fail-fast / wait / drop；空串按 fail-fast 处理。
+	OverloadStrategy string `json:"overload_strategy"`
 }
 
 // Node 对应表 upstream_nodes（上游实例）。
@@ -41,16 +47,17 @@ type Node struct {
 
 // Route 对应表 gateway_routes（路由）。
 type Route struct {
-	ID            int64     `json:"id"`
-	ServiceID     int64     `json:"service_id"`
-	Name          string    `json:"name"`
-	Host          string    `json:"host"`
-	PathPattern   string    `json:"path_pattern"`
-	PathMatchType string    `json:"path_match_type"`
-	Methods       string    `json:"methods"`
-	Enabled       bool      `json:"enabled"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID             int64     `json:"id"`
+	ServiceID      int64     `json:"service_id"`
+	Name           string    `json:"name"`
+	Host           string    `json:"host"`
+	PathPattern    string    `json:"path_pattern"`
+	PathMatchType  string    `json:"path_match_type"`
+	Methods        string    `json:"methods"`
+	Enabled        bool      `json:"enabled"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	MaxConcurrency int       `json:"max_concurrency"`
 }
 
 // Version 对应表 route_versions（配置版本）。

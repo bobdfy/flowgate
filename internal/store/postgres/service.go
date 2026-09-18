@@ -24,14 +24,14 @@ func NewServiceStore(pool *pgxpool.Pool) *ServiceStore {
 func (s *ServiceStore) Create(ctx context.Context, svc *model.Service) error {
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO gateway_services (name, protocol, connect_timeout_ms, request_timeout_ms, enabled, max_retries, retry_on_status, retry_backoff_ms,
-		cb_failure_threshold, cb_cooldown_ms, cb_half_open_limit, response_header_timeout_ms)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		 RETURNING id`,
+		cb_failure_threshold, cb_cooldown_ms, cb_half_open_limit, response_header_timeout_ms, max_concurrency, queue_timeout_ms, overload_strategy)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		 RETURNING id, max_concurrency, queue_timeout_ms, overload_strategy`,
 		svc.Name, svc.Protocol, svc.ConnectTimeoutMs,
 		svc.RequestTimeoutMs, svc.Enabled,
 		svc.MaxRetries, svc.RetryOnStatus, svc.RetryBackoffMs,
-		svc.CBFailureThreshold, svc.CBCooldownMs, svc.CBHalfOpenLimit, svc.ResponseHeaderTimeoutMs,
-	).Scan(&svc.ID)
+		svc.CBFailureThreshold, svc.CBCooldownMs, svc.CBHalfOpenLimit, svc.ResponseHeaderTimeoutMs, svc.MaxConcurrency, svc.QueueTimeoutMs, svc.OverloadStrategy,
+	).Scan(&svc.ID, &svc.MaxConcurrency, &svc.QueueTimeoutMs, &svc.OverloadStrategy)
 
 	if err != nil {
 		return fmt.Errorf("create service failed: %w", err)
@@ -46,13 +46,13 @@ func (s *ServiceStore) GetByID(ctx context.Context, id int64) (*model.Service, e
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, name, protocol, connect_timeout_ms, request_timeout_ms, enabled,
 		        max_retries, retry_on_status, retry_backoff_ms, cb_failure_threshold, cb_cooldown_ms, cb_half_open_limit, response_header_timeout_ms,
-		        created_at, updated_at
+		        created_at, updated_at,max_concurrency, queue_timeout_ms, overload_strategy
 		 FROM gateway_services 
 		 WHERE id = $1`,
 		id,
 	).Scan(
 		&svc.ID, &svc.Name, &svc.Protocol, &svc.ConnectTimeoutMs, &svc.RequestTimeoutMs, &svc.Enabled,
-		&svc.MaxRetries, &svc.RetryOnStatus, &svc.RetryBackoffMs, &svc.CBFailureThreshold, &svc.CBCooldownMs, &svc.CBHalfOpenLimit, &svc.ResponseHeaderTimeoutMs, &svc.CreatedAt, &svc.UpdatedAt,
+		&svc.MaxRetries, &svc.RetryOnStatus, &svc.RetryBackoffMs, &svc.CBFailureThreshold, &svc.CBCooldownMs, &svc.CBHalfOpenLimit, &svc.ResponseHeaderTimeoutMs, &svc.CreatedAt, &svc.UpdatedAt, &svc.MaxConcurrency, &svc.QueueTimeoutMs, &svc.OverloadStrategy,
 	)
 
 	if err != nil {
@@ -70,7 +70,7 @@ func (s *ServiceStore) List(ctx context.Context) ([]model.Service, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, name, protocol, connect_timeout_ms, request_timeout_ms, enabled,
 		        max_retries, retry_on_status, retry_backoff_ms, cb_failure_threshold, cb_cooldown_ms, cb_half_open_limit, response_header_timeout_ms,
-		        created_at, updated_at
+		        created_at, updated_at,max_concurrency, queue_timeout_ms, overload_strategy
 		 FROM gateway_services 
 		 ORDER BY id`,
 	)
@@ -98,6 +98,9 @@ func (s *ServiceStore) List(ctx context.Context) ([]model.Service, error) {
 			&svc.ResponseHeaderTimeoutMs,
 			&svc.CreatedAt,
 			&svc.UpdatedAt,
+			&svc.MaxConcurrency,
+			&svc.QueueTimeoutMs,
+			&svc.OverloadStrategy,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan service row failed: %w", err)
@@ -123,13 +126,15 @@ func (s *ServiceStore) Update(ctx context.Context, svc *model.Service) error {
 		 SET name = $1, protocol = $2, connect_timeout_ms = $3, request_timeout_ms = $4, enabled = $5,
 		     max_retries = $6, retry_on_status = $7, retry_backoff_ms = $8,
 		     cb_failure_threshold = $9, cb_cooldown_ms = $10, cb_half_open_limit = $11, response_header_timeout_ms = $12,
+			 max_concurrency = $13, queue_timeout_ms = $14, overload_strategy = $15,
 		     updated_at = now()
-		 WHERE id = $13`,
+		 WHERE id = $16`,
 		svc.Name, svc.Protocol, svc.ConnectTimeoutMs,
 		svc.RequestTimeoutMs, svc.Enabled,
 		svc.MaxRetries, svc.RetryOnStatus, svc.RetryBackoffMs,
 		svc.CBFailureThreshold, svc.CBCooldownMs, svc.CBHalfOpenLimit,
-		svc.ResponseHeaderTimeoutMs, svc.ID,
+		svc.ResponseHeaderTimeoutMs,
+		svc.MaxConcurrency, svc.QueueTimeoutMs, svc.OverloadStrategy, svc.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("update service failed: %w", err)

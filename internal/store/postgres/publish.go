@@ -178,6 +178,41 @@ func validate(services []model.Service, routes []model.Route, nodes []model.Node
 			nodeCount[n.ServiceID]++
 		}
 	}
+
+	// ★ 路由匹配规则唯一性：host + path_pattern + path_match_type + methods 不能重复。
+	//
+	// 为什么放在发布这里兜底（闸门 1 已经在 API 层挡了）：
+	//   ① 挡住历史脏数据 —— 闸门 1 上线之前建出来的重复路由还在库里；
+	//   ② 挡住任何绕过 admin API 的直接写库。
+	//
+	// 为什么必须挡：网关的 moreSpecific 比较 len(pattern) 的严格大于，
+	// 规则相同的两条路由谁生效取决于遍历顺序（主键升序 = 先建的赢），
+	// 而且完全静默 —— 使用者改了后建的那条会发现"改了没生效"。
+	//
+	// ★ 判定必须和 API 层（RouteStore.FindDuplicateByPattern）完全一致，
+	//   用同一个 normalizeMethods —— 否则会出现"创建时放过、发布时被拒"
+	//   这种自相矛盾的行为。
+	//
+	// ★ 不比较 enabled：停用的路由一旦启用就又会冲突，
+	//   在这里挡住比等到启用时再出问题更安全。
+	type routeKey struct{ host, pattern, matchType, methods string }
+	seen := map[routeKey]model.Route{}
+	var dupErrs []error
+	for _, r := range routes {
+		k := routeKey{r.Host, r.PathPattern, r.PathMatchType, normalizeMethods(r.Methods)}
+		prev, ok := seen[k]
+		if !ok {
+			seen[k] = r
+			continue
+		}
+		dupErrs = append(dupErrs, fmt.Errorf(
+			"路由匹配规则重复: %q 与 %q 的 host=%q path=%q match=%q methods=%q 完全相同（只能保留一条，建议用 PUT 修改）",
+			prev.Name, r.Name, r.Host, r.PathPattern, r.PathMatchType, r.Methods))
+	}
+	if len(dupErrs) > 0 {
+		return &ValidationError{msg: errors.Join(dupErrs...).Error()}
+	}
+
 	for _, r := range routes {
 		if !r.Enabled {
 			continue
@@ -237,7 +272,7 @@ func listServicesTx(ctx context.Context, tx pgx.Tx) ([]model.Service, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT id, name, protocol, connect_timeout_ms, request_timeout_ms, enabled,
 		        max_retries, retry_on_status, retry_backoff_ms, cb_failure_threshold, cb_cooldown_ms, cb_half_open_limit,
-		        created_at, updated_at, response_header_timeout_ms
+		        created_at, updated_at, response_header_timeout_ms, max_concurrency, queue_timeout_ms, overload_strategy
 		 FROM gateway_services ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -248,7 +283,7 @@ func listServicesTx(ctx context.Context, tx pgx.Tx) ([]model.Service, error) {
 		var s model.Service
 		if err := rows.Scan(&s.ID, &s.Name, &s.Protocol, &s.ConnectTimeoutMs, &s.RequestTimeoutMs, &s.Enabled,
 			&s.MaxRetries, &s.RetryOnStatus, &s.RetryBackoffMs, &s.CBFailureThreshold, &s.CBCooldownMs, &s.CBHalfOpenLimit,
-			&s.CreatedAt, &s.UpdatedAt, &s.ResponseHeaderTimeoutMs); err != nil {
+			&s.CreatedAt, &s.UpdatedAt, &s.ResponseHeaderTimeoutMs, &s.MaxConcurrency, &s.QueueTimeoutMs, &s.OverloadStrategy); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -259,7 +294,7 @@ func listServicesTx(ctx context.Context, tx pgx.Tx) ([]model.Service, error) {
 // listRoutesTx 在事务内读取所有路由。
 func listRoutesTx(ctx context.Context, tx pgx.Tx) ([]model.Route, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT id, service_id, name, host, path_pattern, path_match_type, methods, enabled, created_at, updated_at
+		`SELECT id, service_id, name, host, path_pattern, path_match_type, methods, enabled, created_at, updated_at, max_concurrency
 		 FROM gateway_routes ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -268,7 +303,7 @@ func listRoutesTx(ctx context.Context, tx pgx.Tx) ([]model.Route, error) {
 	var out []model.Route
 	for rows.Next() {
 		var r model.Route
-		if err := rows.Scan(&r.ID, &r.ServiceID, &r.Name, &r.Host, &r.PathPattern, &r.PathMatchType, &r.Methods, &r.Enabled, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.ServiceID, &r.Name, &r.Host, &r.PathPattern, &r.PathMatchType, &r.Methods, &r.Enabled, &r.CreatedAt, &r.UpdatedAt, &r.MaxConcurrency); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
