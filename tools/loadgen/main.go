@@ -1,18 +1,12 @@
 // loadgen 是给数据面做并发验证的小工具。
-//
-// 它存在的理由：PowerShell / curl 很难稳定地造出"精确的并发数 + 每个请求
-// 独立的超时"，而验证过载保护必须同时控制这两件事。
-//
 // 两种用法：
-//
-//	1. 打满并发，看状态码分布
-//	     go run ./tools/loadgen -url http://127.0.0.1:8090/ov/ff -key sk_xxx -n 20
-//
-//	2. ★ 客户端中途断开（验证"断开不算过载"）
-//	     go run ./tools/loadgen -url http://127.0.0.1:8090/ov/disc -key sk_xxx \
-//	         -n 10 -timeout 200ms
-//	   -timeout 会让每个请求在 200ms 后主动 cancel context，
-//	   模拟"客户端提前关掉了页面"。
+//  1. 打满并发，看状态码分布
+//     go run ./tools/loadgen -url http://127.0.0.1:8090/ov/ff -key sk_xxx -n 20
+//  2. ★ 客户端中途断开（验证"断开不算过载"）
+//     go run ./tools/loadgen -url http://127.0.0.1:8090/ov/disc -key sk_xxx \
+//     -n 10 -timeout 200ms
+//     -timeout 会让每个请求在 200ms 后主动 cancel context，
+//     模拟"客户端提前关掉了页面"。
 package main
 
 import (
@@ -48,7 +42,7 @@ func main() {
 	}
 	total := *n
 
-	concurrency := *conc
+	concurrency := *conc // 实际并发数
 	if concurrency <= 0 {
 		concurrency = total
 	}
@@ -69,12 +63,10 @@ func main() {
 	)
 
 	t0 := time.Now()
-	for i := 0; i < total; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+	for range total {
+		wg.Go(func() {
+			sem <- struct{}{}        // 获得一个并发名额
+			defer func() { <-sem }() // 函数退出释放名额
 
 			ctx := context.Background()
 			cancel := func() {}
@@ -111,7 +103,7 @@ func main() {
 			mu.Lock()
 			results = append(results, r)
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 	wall := time.Since(t0)
@@ -152,6 +144,7 @@ func main() {
 	}
 }
 
+// minDur 返回一组结果中最小耗时
 func minDur(rs []result) time.Duration {
 	m := rs[0].elapsed
 	for _, r := range rs {
@@ -162,6 +155,7 @@ func minDur(rs []result) time.Duration {
 	return m
 }
 
+// maxDur返回结果中最大耗时
 func maxDur(rs []result) time.Duration {
 	m := rs[0].elapsed
 	for _, r := range rs {

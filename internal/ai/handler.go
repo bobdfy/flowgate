@@ -24,31 +24,17 @@ type ProviderEntry struct {
 	Provider Provider
 
 	// BaseURL 是上游根地址，如 https://api.deepseek.com（不带路径）。
-	// 具体接口路径由 ApiName.Path() 拼上去。
 	BaseURL string
-
-	// // APIKeys 是该 provider 的 key 池（至少一个；空串表示上游不需要鉴权）。
-	// // 现在就用切片而不是单个 string，第四阶段的 failover 池要用，
-	// // 避免以后改签名。
-	// APIKeys []string
 
 	// UpstreamModel 是发给上游时实际使用的模型名；空 = 与客户端请求的相同。
 	// 用于模型别名与灰度：对外 flowgate-chat，对内 gpt-4o-mini。
 	UpstreamModel string
 
 	// Caps 是构造期探测的能力位图。
-	//
-	// 热路径只读布尔值，不再每请求做类型断言 ——
-	// 能力和 provider 实例一样是"构造后不变"的。
 	// 由 cmd/gateway 在装配时调 ProbeCapabilities(entry.Provider) 填充。
 	Caps Capabilities
 
 	// UpstreamPath 是上游真实路径；空 = 用 ApiName.Path()（默认行为）。
-	// 为什么要它：对外路径和上游路径不总是同一个。
-	//   对外（OpenAI SDK 写死的）: POST /v1/chat/completions
-	//   DeepSeek 上游:            /v1/chat/completions     ← 一样
-	//   智谱上游:                 /chat/completions       ← 不一样
-	//     （智谱的 BaseURL 已经含 /api/paas/v4）
 	UpstreamPath string
 }
 
@@ -273,50 +259,28 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 }
 
 // forward 把请求发到上游，返回上游响应。
-//
-// 四条硬约束（写错不报错、只在运行时出问题）：
-//
-//  1. ★ 路径用 joinURL(entry.BaseURL, apiName.Path())，不手拼字符串 ——
-//     手拼少一层 /v1 也能编译通过，只会在运行时报上游 404
-//  2. ★ 请求体必须挂上去（bytes.NewReader(body)）——
-//     漏了的话所有请求都会以空 body 发给上游
-//  3. ★ ctx 必须派生自 r.Context()（用 NewRequestWithContext）——
-//     客户端断开时取消才能传导到上游，否则上游还在生成，token 照烧
-//  4. ★ 组头走白名单（copySafeRequestHeaders）——
-//     Authorization / Host / Cookie / Content-Length 一律网关自己写，
-//     否则客户端能用别的凭据覆盖上游鉴权
-func (h *Handler) forward(r *http.Request, entry *ProviderEntry, apiName ApiName, header map[string][]string, body []byte, streaming bool) (*http.Response, error) {
-	//url := joinURL(entry.BaseURL, apiName.Path())
 
+func (h *Handler) forward(r *http.Request, entry *ProviderEntry, apiName ApiName, header map[string][]string, body []byte, streaming bool) (*http.Response, error) {
 	path := apiName.Path()
 	if entry.UpstreamPath != "" {
 		path = entry.UpstreamPath
 	}
 
 	url := joinURL(entry.BaseURL, path)
-	// ★ 第四个参数是请求体，不能传 nil —— 传 nil 的话上游收到的是空 body。
-	// bytes.NewReader 把字节切片包成可读流，http 包会据此自动推出 Content-Length。
+
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 
-	// ① 先放客户端来的头（白名单过滤）
+	//  先放客户端来的头（白名单过滤）
 	copySafeRequestHeaders(req.Header, header)
-
-	// // 上游鉴权：provider 钩子写的 Authorization 不在客户端透传白名单里，需单独放行。
-	// if vals := header["Authorization"]; len(vals) > 0 && vals[0] != "" {
-	// 	req.Header.Set("Authorization", vals[0])
-	// }
 
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	// ② 再让 provider 改「真实的上游请求头」
-	//    ★ 顺序关键：provider 在最后，它的决定有最终效力
-	//    ★ 客户端的 Authorization / Cookie 已经在 ① 被白名单挡掉了，
-	//      所以客户端无法伪造凭证
+	// 让 provider 改「真实的上游请求头」
 	if entry.Caps.RequestHeaders {
 		if hh, ok := entry.Provider.(RequestHeadersHandler); ok {
 			if herr := hh.OnRequestHeaders(r.Context(), apiName, req.Header); herr != nil {
@@ -326,15 +290,14 @@ func (h *Handler) forward(r *http.Request, entry *ProviderEntry, apiName ApiName
 	}
 
 	// 显式设长度：bytes.NewReader 已经能让包自动推出来，
-	// 但写出来更明确，也避免以后换了 body 类型忘了这回事。
 	req.ContentLength = int64(len(body))
 
 	if streaming {
 		req.Header.Set("Accept", "text/event-stream")
-		// ★ 主动不带 Accept-Encoding：上游不压缩，回来的就是明文 SSE，
-		// 分帧器才能逐事件解析。
-		//（等收到响应再删 Content-Encoding 是无效操作 —— body 已经压缩过了。）
+
+		// 主动不带 Accept-Encoding：上游不压缩，回来的就是明文 SSE，
 		req.Header.Del("Accept-Encoding")
+
 	} else {
 		req.Header.Set("Accept", "application/json")
 	}
@@ -431,8 +394,7 @@ func copySafeRequestHeaders(dst http.Header, src map[string][]string) {
 }
 
 // copySafeHeaders 把上游响应头拷给客户端，剔除逐跳头和长度类头。
-//
-//	Connection / Keep-Alive 等 —— 逐跳头，只对"上游↔网关"这一跳有意义
+// Connection / Keep-Alive 等 —— 逐跳头，只对"上游---网关"这一跳有意义
 func copySafeHeaders(dst, src http.Header) {
 	for k, vv := range src {
 		switch http.CanonicalHeaderKey(k) {
@@ -467,19 +429,6 @@ func classifyUpstreamError(err error) (int, string) {
 	}
 }
 
-// pickKey 从 key 池里挑一个非空 key。
-//
-// 当前策略：第一个非空值。
-// 所以现在就抽成函数，别内联。
-// func pickKey(keys []string) string {
-// 	for _, k := range keys {
-// 		if k != "" {
-// 			return k
-// 		}
-// 	}
-// 	return ""
-// }
-
 // writeJSON 把 v 序列化成 JSON 写入响应。
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -499,5 +448,4 @@ func writeError(w http.ResponseWriter, status int, errType, msg string) {
 }
 
 // maxRequestBody 是请求体上限（16 MiB）。
-// AI 请求可能带很长的上下文或 base64 图片，但不能无上限地吃内存。
 const maxRequestBody = 16 << 20

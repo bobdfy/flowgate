@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Strategy 过载是的处置策略
+// Strategy 过载时的处置策略
 type Strategy string
 
 const (
@@ -33,7 +33,7 @@ const (
 )
 
 type RejectedError struct {
-	// Reason 说明被拒的原因。★ 必须是枚举值，会被当作 Prometheus 的 label ——
+	// Reason 说明被拒的原因。 必须是枚举值，会被当作 Prometheus 的 label ——
 	// 绝不能塞 service 名 / path / key 之类的动态值进去。
 	Reason RejectReason
 
@@ -73,7 +73,7 @@ type Guard struct {
 	// queue 是 drop 策略的等候区, 等着干活的位子
 	queue chan struct{}
 
-	// rejected 是累计被拒数,只增不减。★ 用 atomic 因为多 goroutine 会同时加。
+	// rejected 是累计被拒数,只增不减。用 atomic 因为多 goroutine 会同时加。
 	rejected atomic.Int64
 
 	// 待生效的上限
@@ -82,6 +82,7 @@ type Guard struct {
 	swapMu sync.Mutex
 }
 
+// 并发护栏
 func NewGuard(maxConcurrency int, strategy Strategy, queueTimeout time.Duration, queueCapacity int) *Guard {
 	if queueCapacity <= 0 {
 		queueCapacity = DefaultQueueCapacity(maxConcurrency)
@@ -98,6 +99,7 @@ func NewGuard(maxConcurrency int, strategy Strategy, queueTimeout time.Duration,
 	return g
 }
 
+// Acquire 尝试获取一个并发名额：成功返回幂等的 release(用完必须调用)，失败返回带拒绝原因的 RejectedError。
 func (g *Guard) Acquire(ctx context.Context) (release func(), err error) {
 	if g.maxConcurrency <= 0 {
 		return func() {}, nil
@@ -120,9 +122,6 @@ func (g *Guard) Acquire(ctx context.Context) (release func(), err error) {
 		g.inFlight.Add(1)
 		return releaseOnce, nil
 	default:
-		// ★ 新增:盒子满了,但可能"配置刚缩小、新盒子还没换上去"。
-		// 这时旧盒子还有空位,不能只看它 —— 还要看 incoming。
-		// 这条判断和策略无关,所以放在 switch 之前,只写一遍。
 		if g.incoming.Load() < int64(cap(g.boxes)) && g.inFlight.Load() >= g.incoming.Load() {
 			g.rejected.Add(1)
 			return nil, &RejectedError{
@@ -142,6 +141,7 @@ func (g *Guard) Acquire(ctx context.Context) (release func(), err error) {
 					InFlight:   int(g.inFlight.Load()),
 				}
 			})
+
 		case StrategyDrop:
 			select {
 			case g.queue <- struct{}{}:
@@ -196,15 +196,8 @@ func DefaultQueueCapacity(maxConcurrency int) int {
 }
 
 // SetMaxConcurrency 热更新并发上限（配置刷新时调用）。
-//
-// ★ 缩小上限时不会中断在途请求 —— 让它们跑完,只是不再放新的进来。
-//
-// ★ 因此换盒子有个延迟生效的规则:
-//
 // 等 InFlight 归零时再换
 func (g *Guard) SetMaxConcurrency(n int) {
-	// ★ n = 0 的语义是"拒绝所有请求"(不是"不限流")。
-	//   boxes 容量为 0 时发送永远阻塞,所以所有请求都会走 fast-fail 拒绝。
 	//   "不限流"只能用 NewGuard(0, ...) 表示,不能靠热更新得到。
 	g.incoming.Store(int64(n))
 	g.applyIncomingLimit()

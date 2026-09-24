@@ -50,3 +50,8 @@ b-*.json
 # ===== 本地构建缓存 =====
 # Go 的 build cache 指向工作区时（沙箱环境需要）产生的目录
 .gocache/
+
+
+.review_full.diff
+
+代码与安全评审报告.md

@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"log"
 	"log/slog"
@@ -31,7 +30,7 @@ import (
 func main() {
 	godotenv.Load()
 
-	// 结构化日志：JSON 输出到 stdout
+	// JSON 输出到 stdout (把日志系统输出成 JSON 格式)
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
 	databaseURL := os.Getenv("DATABASE_URL")
@@ -53,21 +52,19 @@ func main() {
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 
 	versionStore := postgres.NewVersionStore(db)
-
 	router := gateway.NewRouter()
 	cache := gateway.NewProxyCache()
 
 	addr := flag.String("addr", ":8090", "监听地址")
 
-	// ★ AI Gateway 开关与配置
-	aiEnabled := flag.Bool("ai", true, "是否启用 AI Gateway（/v1/* 路径）")
-
-	// AI 配置文件路径。文件不存在 → AI 不启用（不报错）。
+	//  AI Gateway 开关与配置
+	aiEnabled := flag.Bool("ai", true, "是否启用 AI Gateway(/v1/* 路径)")
+	// AI 配置文件路径。文件不存在 → AI 不启用(不报错)。
 	aiConfigPath := flag.String("ai-config", "ai.yaml", "AI Gateway 配置文件路径")
-
 	burst := flag.Float64("burst", 200, "令牌桶容量，允许的最大突发请求数")
 	failMode := flag.String("fail-mode", "fallback", "Redis 故障时的策略:closed / fallback / open")
 	flag.Parse()
+
 	if *burst <= 0 {
 		slog.Error("invalid rate limit config", "burst", *burst)
 		os.Exit(1)
@@ -80,6 +77,7 @@ func main() {
 	Limiter := ratelimit.NewFallbackLimiter(redisL, local, ratelimit.FailMode(*failMode))
 
 	apiKeyStore := postgres.NewAPIKeyStore(db)
+
 	authenticator := middleware.NewAuthenticator(apiKeyStore)
 
 	tenantKey := func(r *http.Request) (string, int64) {
@@ -107,10 +105,12 @@ func main() {
 		if ver == nil {
 			return 0, gateway.RouteTable{}, nil
 		}
+
 		items, err := versionStore.GetItemsByVersion(context.Background(), ver.ID)
 		if err != nil {
 			return 0, nil, err
 		}
+
 		table, err := gateway.BuildRoutes(items, cache, pools)
 		if err != nil {
 			return 0, nil, err
@@ -169,6 +169,9 @@ func main() {
 	}
 	aiCfg.Enabled = aiCfg.Enabled && *aiEnabled
 
+	// 网关自己拒绝请求时回什么 body：AI 路径回 OpenAI 错误结构，其余回纯文本。
+	errorResponder := middleware.OpenAIErrorResponder(isAIRoute)
+
 	handler := middleware.RequestID(
 		middleware.Logging(
 			authenticator.RequireAuth(
@@ -176,11 +179,11 @@ func main() {
 					Limiter, tenantKey, middleware.RateLimit(
 						Limiter, apiKey, buildAIRouter(
 							*aiCfg, router),
-						gatewayErrorResponse,
+						errorResponder,
 					),
-					gatewayErrorResponse,
+					errorResponder,
 				),
-				gatewayErrorResponse,
+				errorResponder,
 			),
 		),
 	)
@@ -203,14 +206,18 @@ func main() {
 
 	go func() {
 		log.Println("pprof listen :6060")
-		log.Println(http.ListenAndServe(":6060", nil))
+		if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
+			log.Fatal(err)
+		}
 	}()
 
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.Handler())
 		log.Println("metrics listening on :9090")
-		http.ListenAndServe(":9090", mux)
+		if err := http.ListenAndServe(":9090", mux); err != nil {
+			log.Fatal(err)
+		}
 	}()
 
 	// 在独立 goroutine 里监听，主 goroutine 等待退出信号。
@@ -234,64 +241,4 @@ func main() {
 		log.Printf("gateway 优雅关闭失败: %v", err)
 	}
 	log.Println("gateway 已退出")
-}
-
-// 两条链路的调用方不是同一批程序，所以 body 格式必须分开：
-//
-//	AI 路径   → OpenAI 错误结构。调用方是 SDK，它按 {"error":{"message":...}} 解析，
-//	            给它纯文本，用户看到的是 SDK 自己抛的解析异常，而不是真正的原因。
-//	普通路径  → 纯文本。调用方多半是人或内部服务，状态码就够，没必要编 JSON。
-//
-// 判定用 isAIRoute（cmd/gateway/ai.go），和真正的分流共用同一份事实来源，
-// 不会出现"分流当成 AI、401 当成普通"这种两处漂移。
-//
-// 状态码原样透传，这里只换 body —— 401 还是 401，500 还是 500。
-func gatewayErrorResponse(w http.ResponseWriter, r *http.Request, status int, msg string) {
-	if isAIRoute(r) {
-		writeAIError(w, status, msg)
-		return
-	}
-	http.Error(w, msg, status)
-}
-
-// writeAIError 按 OpenAI 的错误结构回一个 JSON body。
-//
-// 形状对齐 internal/ai/response.go 里的 ErrorResponseBody，故意不 import 它：
-// 那是"上游错误"的类型，这里是"网关自己拒绝"的 body，两者生命周期不同 ——
-// 以后给上游错误加字段不该顺带改掉网关的拒绝响应。
-//
-// type 字段用 status 映射成 OpenAI 的几个枚举值：
-// 401/403 归 authentication_error，其余按状态码给通用值。
-// 这个字段 SDK 只用来分类展示，填错不影响解析，但不能不填 —— 它是必填。
-func writeAIError(w http.ResponseWriter, status int, msg string) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	// 和 http.Error 保持一致：这个 body 不该被任何中间层嗅探成别的类型。
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(status)
-
-	body := map[string]any{
-		"error": map[string]any{
-			"message": msg,
-			"type":    aiErrorType(status),
-			"code":    status,
-		},
-	}
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		// 响应已经开始写了，改不了状态码，只能记一笔。
-		slog.Warn("write_ai_error_failed", "err", err)
-	}
-}
-
-// aiErrorType 把 HTTP 状态码映射成 OpenAI 风格的错误类型字符串。
-func aiErrorType(status int) string {
-	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return "authentication_error"
-	case http.StatusTooManyRequests:
-		return "rate_limit_error"
-	case http.StatusNotFound:
-		return "not_found_error"
-	default:
-		return "gateway_error"
-	}
 }

@@ -1,0 +1,101 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="第 1 页" id="jupBQ65klVk_Aap50HvC">
+    <mxGraphModel dx="970" dy="538" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="" vertex="1">
+          <mxGeometry height="250" width="330" x="220" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-3" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="gateway :8090" vertex="1">
+          <mxGeometry height="30" width="170" x="340" y="180" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-4" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="客户端/业务方&lt;div&gt;（携带着X-API-Key）&lt;/div&gt;" vertex="1">
+          <mxGeometry height="60" width="120" x="80" y="120" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-5" edge="1" parent="1" source="5wtndw6t_a_Vr3h_1YJ_-4" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <Array as="points">
+              <mxPoint x="140" y="240" />
+            </Array>
+            <mxPoint x="120" y="240" as="sourcePoint" />
+            <mxPoint x="220" y="240" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-6" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="1.请求" vertex="1">
+          <mxGeometry height="30" width="60" x="80" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-7" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="RequestID - &amp;gt; Logging&amp;nbsp;&lt;div&gt;-&amp;gt; RequireAuth(查数据库)&lt;div&gt;&amp;nbsp;-&amp;gt; RateLimit(租户)&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp;&lt;/div&gt;&lt;div&gt;&amp;nbsp;-&amp;gt; RateLimit(Key)&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp;&amp;nbsp;&lt;/div&gt;&lt;div&gt;-&amp;gt; 分流&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp;&amp;nbsp;&lt;/div&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="100" width="150" x="260" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-8" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="AI Handler&amp;nbsp; -----&amp;gt; 大模型和 API&amp;nbsp;" vertex="1">
+          <mxGeometry height="30" width="260" x="270" y="280" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-9" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="Router -----&amp;gt; 匹配路由（快照）&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp;&lt;div&gt;-&amp;gt; 路由级别的护栏&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp;&amp;nbsp;&lt;/div&gt;&lt;div&gt;-&amp;gt; 选择实例（加权轮询 + 健康过滤）&lt;/div&gt;&lt;div&gt;-&amp;gt; 服务级护栏（并发保护）&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp;&lt;/div&gt;&lt;div&gt;-&amp;gt; 分层超时 + 幂等重试&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp;&amp;nbsp;&lt;/div&gt;&lt;div&gt;-&amp;gt; 转发 -----&amp;gt; 上游服务&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="100" width="280" x="270" y="300" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-10" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="&lt;div&gt;&lt;br&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="100" width="170" x="40" y="510" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-11" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="PostgreSQL" vertex="1">
+          <mxGeometry height="30" width="80" x="80" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-12" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="服务 / 路由 / 实例&lt;div&gt;版本快照&lt;/div&gt;&lt;div&gt;租户 / API Key&lt;/div&gt;" vertex="1">
+          <mxGeometry height="60" width="120" x="70" y="550" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-13" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="admin&lt;div&gt;控制面 :8092&lt;/div&gt;" vertex="1">
+          <mxGeometry height="60" width="120" x="60" y="680" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-14" edge="1" parent="1" source="5wtndw6t_a_Vr3h_1YJ_-13" style="endArrow=classic;html=1;rounded=0;entryX=0.472;entryY=1.028;entryDx=0;entryDy=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryPerimeter=0;" target="5wtndw6t_a_Vr3h_1YJ_-10" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <mxPoint x="230" y="650" as="sourcePoint" />
+            <mxPoint x="280" y="600" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-15" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="发布配置,网关每5秒轮询版本号 ---&amp;gt; 变化则原子替换路由表" vertex="1">
+          <mxGeometry height="60" width="260" x="120" y="630" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-16" edge="1" parent="1" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.475;entryY=-0.005;entryDx=0;entryDy=0;entryPerimeter=0;" target="5wtndw6t_a_Vr3h_1YJ_-10" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <Array as="points">
+              <mxPoint x="340" y="479.87" />
+              <mxPoint x="120" y="480" />
+            </Array>
+            <mxPoint x="340" y="429.87" as="sourcePoint" />
+            <mxPoint x="24.219999999999914" y="510" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-17" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="2.每一个请求查询" vertex="1">
+          <mxGeometry height="30" width="100" x="120" y="480" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-18" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="Redis&lt;div&gt;Lua 滑动窗口&lt;/div&gt;&lt;div&gt;(多实例共享)&lt;/div&gt;" vertex="1">
+          <mxGeometry height="60" width="120" x="280" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-19" edge="1" parent="1" style="endArrow=classic;html=1;rounded=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="5wtndw6t_a_Vr3h_1YJ_-18" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <mxPoint x="340" y="480" as="sourcePoint" />
+            <mxPoint x="450" y="499.64932188134526" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-20" edge="1" parent="1" style="endArrow=classic;html=1;rounded=0;" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <Array as="points">
+              <mxPoint x="560" y="480" />
+            </Array>
+            <mxPoint x="340" y="480" as="sourcePoint" />
+            <mxPoint x="560" y="520" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-21" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="上游服务&lt;div&gt;普通的 HTTP 后端&lt;/div&gt;&lt;div&gt;或 大模型API&lt;/div&gt;" vertex="1">
+          <mxGeometry height="60" width="120" x="500" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-23" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="3.每请求查限流" vertex="1">
+          <mxGeometry height="30" width="100" x="340" y="490" as="geometry" />
+        </mxCell>
+        <mxCell id="5wtndw6t_a_Vr3h_1YJ_-24" parent="1" style="text;whiteSpace=wrap;html=1;" value="&lt;div style=&quot;text-align: center;&quot;&gt;&lt;span style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;4.转发&lt;/span&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="30" width="50" x="570" y="490" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

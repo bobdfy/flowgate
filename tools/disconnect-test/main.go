@@ -90,7 +90,7 @@ func main() {
 	fmt.Println("\n========================================")
 	fmt.Println("现在去看这两个终端：")
 	fmt.Println("  1. 网关终端   → 应该有 stream_client_gone")
-	fmt.Println("  2. ★ mockai 终端 → 应该有「写事件失败（客户端可能已断开）」")
-	fmt.Println("     ★ 第 2 条才是「没白烧 token」的证据")
+	fmt.Println("  2. mockai 终端 → 应该有「写事件失败（客户端可能已断开）」")
+	fmt.Println("     第 2 条才是「没白烧 token」的证据")
 	fmt.Println("========================================")
 }

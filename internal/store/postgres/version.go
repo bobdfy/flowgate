@@ -91,7 +91,6 @@ func (v *VersionStore) GetItemsByVersion(ctx context.Context, versionID int64) (
 
 // ListVersions 列出所有版本（按 version 倒序，最新的在前）。
 func (v *VersionStore) ListVersions(ctx context.Context) ([]model.Version, error) {
-	// 提示：SELECT ... FROM route_versions ORDER BY version DESC
 	const query = `SELECT id, version, status, config_hash, published_at, created_at FROM route_versions ORDER BY version DESC`
 
 	rows, err := v.pool.Query(ctx, query)

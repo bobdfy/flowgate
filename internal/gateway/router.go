@@ -15,11 +15,11 @@ import (
 )
 
 type routeEntry struct {
-	host      string
-	pattern   string
-	matchType string
+	host      string // 域名
+	pattern   string // 路径匹配模式
+	matchType string // 匹配类型
 	methods   map[string]bool
-	backend   *Backend
+	backend   *Backend // 转发
 
 	// 路由级并发护栏
 	// 保护同一服务上的其他路由
@@ -32,7 +32,6 @@ type RouteTable []*routeEntry
 // BuildRoutes 从版本快照条目构建 path → Backend 的路由表。
 // 分三遍遍历：先收集服务、再收集实例、最后用路由把两者拼装起来。
 func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*loadbalance.NodePool) (RouteTable, error) {
-
 	services := map[int64]model.Service{}
 	for _, item := range items {
 		if item.ResourceType != "service" {
@@ -77,6 +76,7 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 		if err := json.Unmarshal(item.ResourceSnapshot, &route); err != nil {
 			return nil, fmt.Errorf("解析 route 快照失败: %w", err)
 		}
+
 		svc, ok := services[route.ServiceID]
 		if !ok {
 			continue
@@ -84,6 +84,7 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 		if !route.Enabled {
 			continue
 		}
+
 		specs := nodeSpecs[route.ServiceID]
 		if len(specs) == 0 {
 			continue
@@ -99,6 +100,7 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 				pool = loadbalance.NewNodePool(specs)
 				pools[route.ServiceID] = pool
 			}
+
 			pool.SetCBConfig(svc.CBFailureThreshold, svc.CBCooldownMs, svc.CBHalfOpenLimit)
 
 			lb := loadbalance.NewRoundRobin(pool)
@@ -110,6 +112,7 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 			backends[route.ServiceID] = backend
 			pools[route.ServiceID] = pool
 		}
+
 		entries = append(entries, &routeEntry{
 			host:      route.Host,
 			pattern:   route.PathPattern,
@@ -164,12 +167,13 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 	}
+
 	if best == nil {
 		http.NotFound(w, req)
 		return
 	}
 
-	// ★ 两层护栏的获取顺序是硬约束：路由级先（外），服务级后（内）
+	// ★两层护栏的获取顺序是硬约束：路由级先（外），服务级后（内）
 	release, err := best.guard.Acquire(req.Context())
 	if err != nil {
 		rejectOverload(w, err, "route", best.pattern, func(reason string) {
@@ -211,7 +215,7 @@ func parseMethods(s string) map[string]bool {
 		return nil
 	}
 	m := map[string]bool{}
-	for _, part := range strings.Split(s, ",") {
+	for part := range strings.SplitSeq(s, ",") {
 		if p := strings.TrimSpace(part); p != "" {
 			m[p] = true
 		}

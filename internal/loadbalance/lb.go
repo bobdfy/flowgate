@@ -21,7 +21,7 @@ const (
 // NodeState 表示一个上游实例的运行时状态。服务器信息
 type NodeState struct {
 	Address          string // 实例地址，如 http://localhost:8091
-	Weight           int    // 权重（WeightedRoundRobin 用，先保留默认 1）
+	Weight           int    // 权重
 	State            CircuitState
 	Fails            int
 	OpenUntil        time.Time // Open 态冷却到期时间
@@ -33,7 +33,7 @@ type NodeState struct {
 type NodePool struct {
 	mu                 sync.RWMutex
 	nodes              []*NodeState
-	cursor             int // 轮询游标：记住上次轮到第几个（RoundRobin 用）
+	cursor             int // 轮询游标：记住上次轮到第几个
 	CBFailureThreshold int // 熔断：连续失败上限
 	CBCooldownMs       int // 熔断：Open 态冷却时长（毫秒）
 	CBHalfOpenLimit    int // 熔断：HalfOpen 态最多同时放几个试探请求
@@ -224,9 +224,6 @@ func (p *NodePool) RecordResult(n *NodeState, ok bool) {
 		}
 
 	case StateOpen:
-		// Open 态不派发流量，正常不会走到这里；
-		// 如果是健康检查在冷却到期后探测到的结果，也忽略——
-		// 恢复由 AvailableNodes 的惰性转换 + 真实流量试探驱动
 	}
 }
 
@@ -255,6 +252,7 @@ func (p *NodePool) SyncNodes(specs []NodeSpec) {
 	for _, n := range kept {
 		have[n.Address] = true
 	}
+
 	for _, s := range specs {
 		if !have[s.Address] {
 			w := s.Weight

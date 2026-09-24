@@ -23,7 +23,12 @@ CREATE TABLE gateway_services (
     cb_cooldown_ms       INTEGER      NOT NULL DEFAULT 10000,
     cb_half_open_limit   INTEGER      NOT NULL DEFAULT 1,
     -- 超时
-    response_header_timeout_ms INTEGER NOT NULL DEFAULT 5000
+    response_header_timeout_ms INTEGER NOT NULL DEFAULT 5000,
+
+    -- 并发保护
+    max_concurrency   INTEGER     NOT NULL DEFAULT 0,
+    queue_timeout_ms  INTEGER     NOT NULL DEFAULT 0,
+    overload_strategy VARCHAR(20) NOT NULL DEFAULT 'fail-fast'
 );
 
 -- 2. upstream_nodes —— 上游实例
@@ -51,7 +56,9 @@ CREATE TABLE gateway_routes (
     enabled         BOOLEAN      NOT NULL DEFAULT true,     -- 是否启用
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    host VARCHAR(255) NOT NULL DEFAULT ''
+    host VARCHAR(255) NOT NULL DEFAULT '',
+    -- Bulkhead：按路由限并发，让一条慢路由打不满整个服务
+    max_concurrency INTEGER NOT NULL DEFAULT 0
 );
 
 -- 4. route_versions —— 配置版本
@@ -80,3 +87,32 @@ CREATE INDEX idx_upstream_nodes_service_id ON upstream_nodes(service_id);
 CREATE INDEX idx_gateway_routes_service_id ON gateway_routes(service_id);
 CREATE INDEX idx_route_version_items_version_id ON route_version_items(version_id);
 CREATE INDEX idx_route_versions_status_version ON route_versions(status, version);
+
+
+-- 1. tenants —— 租户
+--    限流、配额、用量归属的基本单位。
+CREATE TABLE tenants (
+    id         BIGSERIAL PRIMARY KEY,
+    name       VARCHAR(255) NOT NULL UNIQUE,             -- 租户名，唯一
+    status     VARCHAR(20)  NOT NULL DEFAULT 'active',   -- active / disabled
+    created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    qps_limit INTEGER NOT NULL DEFAULT 100
+);
+
+-- 2. api_keys —— 租户的 API Key
+--    一个租户可以有多个 Key（不同用途、不同环境）。
+CREATE TABLE api_keys (
+    id           BIGSERIAL PRIMARY KEY,
+    tenant_id    BIGINT       NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, 
+                                                    -- 属于哪个租户
+    name         VARCHAR(255) NOT NULL,             -- Key 的名字（如 "prod", "test"）
+    key_hash     VARCHAR(64)  NOT NULL UNIQUE,      -- Key 的 SHA256 哈希（不存明文）
+    status       VARCHAR(20)  NOT NULL DEFAULT 'active',       -- active / disabled
+    expires_at   TIMESTAMPTZ,                       -- 过期时间；NULL = 永不过期
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    last_used_at TIMESTAMPTZ,                       -- 最后使用时间（低频更新）
+    qps_limit INTEGER NOT NULL DEFAULT 100
+);
+
+-- 索引：按租户查它的所有 Key
+CREATE INDEX idx_api_keys_tenant_id ON api_keys(tenant_id);

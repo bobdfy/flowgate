@@ -17,8 +17,9 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn failed: %w", err)
 	}
+
 	// 连接池上限：pgxpool 默认 max(4, NumCPU)，这里显式收窄，避免打满 Postgres
-	cfg.MaxConns = 10
+	cfg.MaxConns = 50
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

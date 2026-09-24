@@ -15,7 +15,6 @@ type OpenAIProvider struct {
 }
 
 // NewOpenAIProvider 创建一个 OpenAI 兼容供应商。
-//
 // apiKeys 允许为空（本地 Ollama 无鉴权）。
 func NewOpenAIProvider(name string, apiKeys []string) *OpenAIProvider {
 	return &OpenAIProvider{name: name, apiKeys: apiKeys}

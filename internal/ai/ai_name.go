@@ -6,8 +6,6 @@ import (
 )
 
 // ApiName 是内部规范名，格式为 {vendor}/{version}/{apitype}。
-// 例：openai/v1/chatcompletions。
-// 对外暴露的是 OpenAI 兼容路径，但对内必须能表达
 type ApiName string
 
 // 对外暴露的 OpenAI 接口规范名。
@@ -36,7 +34,6 @@ var aiRoutes = map[string]ApiName{
 // Path 返回该规范名对外暴露的 HTTP 路径。
 //
 // 转发到上游时也用这个路径 —— 它是"路径拼装"的唯一来源。
-// 手拼字符串（BaseURL + "/chat/completions"）是这类代码最常见的 bug，
 func (a ApiName) Path() string {
 	return aiPath[a]
 }
@@ -56,10 +53,7 @@ func (a ApiName) Valid() bool {
 }
 
 // ApiNameFromPath 把 HTTP 方法 + 路径映射成内部规范名。
-// 未注册的路径返回 ("", false)。
-//
-// 调用方拿到 false 必须回 404，绝不能 fallthrough 到普通 API 路由 ——
-// 否则 AI 路径会被当成业务路径代理出去，那是个安全洞。
+// 未注册的路径返回 ("", false)。拿到 false 必须回 404
 func ApiNameFromPath(method, path string) (ApiName, bool) {
 	// 容忍结尾斜杠：/v1/models/ 与 /v1/models 等价。
 	if len(path) > 1 && strings.HasSuffix(path, "/") {
@@ -77,8 +71,7 @@ type AIRoute struct {
 }
 
 // RegisteredRoutes 返回所有已注册的 AI 接口，供 cmd/gateway 统一挂路由。
-//
-// 为什么要有它：让"路由注册"和"路径映射表"共用同一份事实来源。
+// 让"路由注册"和"路径映射表"共用同一份事实来源。
 func RegisteredRoutes() []AIRoute {
 	// 防御：aiPath 里的每个接口都必须能在 aiRoutes 里找到对应的 method+path，
 	// 否则说明加接口时漏了其中一张表。

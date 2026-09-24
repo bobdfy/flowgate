@@ -35,6 +35,7 @@ func (f *Framer) Frame(chunk []byte) (events [][]byte) {
 			f.resyncCarry = s.lastBytes(0, maxDelimiterBytes-1)
 			return nil
 		}
+
 		end := ends[0]
 		f.resyncing = false
 		f.resyncCarry = nil

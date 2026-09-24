@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+type FailMode string
+
 type FallbackLimiter struct {
 	primary  Limiter // Redis限流:滑动窗口
 	fallback Limiter // 本地令牌桶
@@ -16,8 +18,6 @@ type FallbackLimiter struct {
 	lastAlert time.Time
 	alertGap  time.Duration
 }
-
-type FailMode string
 
 const (
 	FailClosed   FailMode = "closed"
