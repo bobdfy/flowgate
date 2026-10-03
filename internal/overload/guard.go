@@ -4,7 +4,6 @@ package overload
 import (
 	"context"
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -75,11 +74,6 @@ type Guard struct {
 
 	// rejected 是累计被拒数,只增不减。用 atomic 因为多 goroutine 会同时加。
 	rejected atomic.Int64
-
-	// 待生效的上限
-	incoming atomic.Int64
-
-	swapMu sync.Mutex
 }
 
 // 并发护栏
@@ -95,7 +89,6 @@ func NewGuard(maxConcurrency int, strategy Strategy, queueTimeout time.Duration,
 		boxes:          make(chan struct{}, maxConcurrency),
 		queue:          make(chan struct{}, queueCapacity),
 	}
-	g.incoming.Store(int64(maxConcurrency))
 	return g
 }
 
@@ -114,7 +107,6 @@ func (g *Guard) Acquire(ctx context.Context) (release func(), err error) {
 		released = true
 		<-g.boxes
 		g.inFlight.Add(-1)
-		g.applyIncomingLimit()
 	}
 
 	select {
@@ -122,14 +114,6 @@ func (g *Guard) Acquire(ctx context.Context) (release func(), err error) {
 		g.inFlight.Add(1)
 		return releaseOnce, nil
 	default:
-		if g.incoming.Load() < int64(cap(g.boxes)) && g.inFlight.Load() >= g.incoming.Load() {
-			g.rejected.Add(1)
-			return nil, &RejectedError{
-				Reason:   ReasonFailFast,
-				InFlight: int(g.inFlight.Load()),
-			}
-		}
-
 		switch g.strategy {
 		case StrategyWait:
 
@@ -193,31 +177,6 @@ func DefaultQueueCapacity(maxConcurrency int) int {
 		return 0
 	}
 	return maxConcurrency * 2
-}
-
-// SetMaxConcurrency 热更新并发上限（配置刷新时调用）。
-// 等 InFlight 归零时再换
-func (g *Guard) SetMaxConcurrency(n int) {
-	//   "不限流"只能用 NewGuard(0, ...) 表示,不能靠热更新得到。
-	g.incoming.Store(int64(n))
-	g.applyIncomingLimit()
-}
-
-// applyIncomingLimit 在安全的时候把 incoming 应用到 boxes 上。
-func (g *Guard) applyIncomingLimit() {
-	want := int(g.incoming.Load())
-
-	g.swapMu.Lock()
-	defer g.swapMu.Unlock()
-
-	if want == cap(g.boxes) {
-		return
-	}
-
-	if g.inFlight.Load() != 0 {
-		return
-	}
-	g.boxes = make(chan struct{}, want)
 }
 
 func (g *Guard) Stats() Stats {

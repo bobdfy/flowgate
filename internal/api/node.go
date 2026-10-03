@@ -3,8 +3,10 @@ package api
 import (
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 
 	"github.com/bobdfy/flowgate/internal/model"
@@ -36,6 +38,15 @@ func (h *Handler) CreateNode(w http.ResponseWriter, r *http.Request) {
 	u, err := url.Parse(node.Address)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		writeError(w, http.StatusBadRequest, "address must be a full URL, e.g. http://localhost:8091")
+		return
+	}
+	// S2：只允许 http/https，并拦内网/回环地址，防止 SSRF（本地联调可用 ALLOW_PRIVATE_UPSTREAM=1 放开）。
+	if u.Scheme != "http" && u.Scheme != "https" {
+		writeError(w, http.StatusBadRequest, "address scheme must be http or https")
+		return
+	}
+	if os.Getenv("ALLOW_PRIVATE_UPSTREAM") != "1" && isPrivateHost(u.Hostname()) {
+		writeError(w, http.StatusBadRequest, "address points to a private/loopback host")
 		return
 	}
 
@@ -106,4 +117,20 @@ func (h *Handler) DeleteNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// isPrivateHost 判断 host 是否解析到内网 / 回环 / 链路本地地址（SSRF 防护）。
+// 解析失败按私有处理：宁可拒绝，不放过可疑地址。
+func isPrivateHost(host string) bool {
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return true
+	}
+	for _, ip := range ips {
+		if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return true
+		}
+	}
+	return false
 }

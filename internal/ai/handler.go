@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -161,6 +162,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 9. 发上游请求。
 	resp, err := h.forward(r, entry, apiName, header, body, streaming)
 	if err != nil {
+		// C8：客户端主动取消时连接已断开，回写无意义，别把取消误报成非标准 499。
+		if errors.Is(err, context.Canceled) {
+			slog.Info("ai_forward_canceled",
+				"model", req.Model, "provider", entry.Name, "api", string(apiName))
+			return
+		}
 		status, errType := classifyUpstreamError(err)
 		slog.Error("ai_forward_failed",
 			"model", req.Model, "provider", entry.Name,
@@ -183,7 +190,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // 不把上游的全部模型名泄露给客户端。
 func (h *Handler) serveModels(w http.ResponseWriter) {
 	list := ModelList{Object: "list", Data: make([]ModelInfo, 0, len(h.providers))}
-	for name, entry := range h.providers {
+	// C9：map 遍历顺序不稳定，先排序再构造，保证 /v1/models 返回稳定（也避免 golden 测试 flaky）。
+	names := make([]string, 0, len(h.providers))
+	for name := range h.providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		entry := h.providers[name]
 		owned := "flowgate"
 		if entry != nil && entry.Name != "" {
 			owned = entry.Name
@@ -248,11 +262,10 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 	// sink 目前恒为 nil。
 	//
 	// 它原本是给用量统计用的钩子（逐事件抽 usage 交给 Meter）。
-	// 现在不做计费，所以留 nil；以后要做的话在这里赋值即可，
-	// streamProxy 的签名不用改。
+	// 现在不做计费，所以留 nil；以后要做的话在这里赋值即可。
 	var sink StreamEventSink
 
-	if err := h.streams(w, r, resp.Body, sink); err != nil {
+	if err := h.streams(w, r, resp.Body, sink, model); err != nil {
 		// 响应头可能已经发出去了，只能记日志。
 		slog.Warn("ai_stream_failed", "model", model, "err", err)
 	}
@@ -295,8 +308,8 @@ func (h *Handler) forward(r *http.Request, entry *ProviderEntry, apiName ApiName
 	if streaming {
 		req.Header.Set("Accept", "text/event-stream")
 
-		// 主动不带 Accept-Encoding：上游不压缩，回来的就是明文 SSE，
-		req.Header.Del("Accept-Encoding")
+		// C5：显式设 identity 才能真正禁用压缩 —— http.Transport 在 header 缺省时会自动补 gzip。
+		req.Header.Set("Accept-Encoding", "identity")
 
 	} else {
 		req.Header.Set("Accept", "application/json")
@@ -419,11 +432,10 @@ func copySafeHeaders(dst, src http.Header) {
 
 // classifyUpstreamError 把上游调用错误映射成 HTTP 状态码 + OpenAI 错误类型。
 func classifyUpstreamError(err error) (int, string) {
+	// context.Canceled 已在上层单独处理（客户端断开，不回写）。
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusGatewayTimeout, ErrTypeTimeout
-	case errors.Is(err, context.Canceled):
-		return 499, ErrTypeInvalidRequest
 	default:
 		return http.StatusBadGateway, ErrTypeUpstream
 	}

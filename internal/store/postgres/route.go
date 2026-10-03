@@ -50,7 +50,7 @@ func (r *RouteStore) Create(ctx context.Context, route *model.Route) error {
 // （都是"只接受这两种方法"），字符串比较会把它们当成不同的路由，
 // 于是漏判冲突 —— 而这正是最危险的方向（该拦的没拦）。
 //
-// 空串保持空串（语义是"不限方法"，和其他任何值都不同）。
+// 空串保持空串（语义是"不限方法"，视为通配，与任何具体 methods 都冲突）。
 func normalizeMethods(methods string) string {
 	if strings.TrimSpace(methods) == "" {
 		return ""
@@ -109,7 +109,9 @@ func (r *RouteStore) FindDuplicateByPattern(ctx context.Context, host, pattern, 
 			return 0, fmt.Errorf("scan duplicate route failed: %w", err)
 		}
 		// methods 在 Go 侧规范化后再比 —— SQL 里做不了"排序后比较"。
-		if normalizeMethods(got) == want {
+		// C1：空（= 不限方法）与任何具体 methods 都算冲突，否则后建的具体路由会被先建的不限方法路由静默遮蔽。
+		gotNorm := normalizeMethods(got)
+		if gotNorm == want || gotNorm == "" || want == "" {
 			return id, nil
 		}
 	}

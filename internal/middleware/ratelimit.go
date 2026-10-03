@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bobdfy/flowgate/internal/identity"
 	"github.com/bobdfy/flowgate/internal/observability"
 	"github.com/bobdfy/flowgate/internal/ratelimit"
 )
@@ -19,7 +20,8 @@ type KeyFunc func(*http.Request) (string, int64)
 // ClientKey 默认 key 提取：优先 X-API-Key，其次客户端 IP（带来源前缀避免命名空间撞车）。
 func ClientKey(r *http.Request) (string, int64) {
 	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
-		return "key:" + apiKey, 100
+		// S7：只把明文 key 的哈希当限流 key，避免明文进 Prometheus 标签。
+		return "key:" + identity.HashKey(apiKey), 100
 	}
 
 	ip := r.RemoteAddr
@@ -52,6 +54,16 @@ func RateLimit(limiter ratelimit.Limiter, keyFn KeyFunc, next http.Handler, resp
 				"method", r.Method, // 记录请求方法
 				"path", r.URL.Path, // 记录请求路径
 			)
+			// S5：按 fail-mode 决定放行还是拒绝。open 模式（放行优先）下限流器自身也出错，
+			// 说明兜底也失效，此时应拒绝而非无条件放行。
+			if p, ok := limiter.(interface{ FailMode() ratelimit.FailMode }); ok && p.FailMode() == ratelimit.FailOpen {
+				if responder != nil {
+					responder(w, r, http.StatusServiceUnavailable, "rate limiter unavailable")
+					return
+				}
+				http.Error(w, "rate limiter unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -272,6 +272,12 @@ func (b *Backend) ReportMetrics() {
 func rejectOverload(w http.ResponseWriter, err error, role, name string, inc func(reason string)) bool {
 	var rej *overload.RejectedError
 	if !errors.As(err, &rej) {
+		// C2：排队等待超时（ctx 到点）要回 504，不能隐式回 200 空 body。
+		if errors.Is(err, context.DeadlineExceeded) {
+			http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
+			return true
+		}
+		// context.Canceled：客户端已断开，无需回写。
 		slog.Debug("guard_ctx_done", "role", role, "name", name, "err", err)
 		return true
 	}

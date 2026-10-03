@@ -22,6 +22,10 @@ func parseUpstream(addr string) (*url.URL, error) {
 	if err != nil || u.Host == "" {
 		return nil, fmt.Errorf("非法上游地址: %q", addr)
 	}
+	// S2：数据面第二道防线，只允许 http/https。
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("非法上游 scheme: %q", u.Scheme)
+	}
 	return u, nil
 }
 
@@ -80,6 +84,13 @@ func forwardOnce(transport *http.Transport, req *http.Request, target *url.URL) 
 	outReq.Host = target.Host
 
 	removeByHopHeaders(outReq.Header)
+
+	// S4：覆盖客户端伪造的 X-Forwarded-For / X-Real-IP，统一由网关填真实来源。
+	if ip, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+		outReq.Header.Del("X-Forwarded-For")
+		outReq.Header.Del("X-Real-IP")
+		outReq.Header.Set("X-Forwarded-For", ip)
+	}
 
 	resp, err := transport.RoundTrip(outReq)
 	if err != nil {

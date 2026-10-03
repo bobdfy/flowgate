@@ -16,14 +16,14 @@ type StreamEventSink func(event []byte, isLast bool) []byte
 
 // StreamingForwarder 是流式转发函数。
 // 职责：把上游 body 逐块读出 → 过 internal/sse 分帧 → 逐事件 Flush 给客户端。
-type StreamingForwarder func(w http.ResponseWriter, r *http.Request, upstream io.ReadCloser, sink StreamEventSink) error
+type StreamingForwarder func(w http.ResponseWriter, r *http.Request, upstream io.ReadCloser, sink StreamEventSink, model string) error
 
 // streamBufSize 是每次从上游读取的缓冲区大小。
 const streamBufSize = 4096
 
 // streamProxy 是 StreamingForwarder 的默认实现。
 //  1. 分帧 2. 实时 3. 取消
-func streamProxy(w http.ResponseWriter, r *http.Request, upstream io.ReadCloser, sink StreamEventSink) error {
+func streamProxy(w http.ResponseWriter, r *http.Request, upstream io.ReadCloser, sink StreamEventSink, model string) error {
 	rc := http.NewResponseController(w)
 
 	framer := sse.NewFramer()
@@ -72,7 +72,8 @@ func streamProxy(w http.ResponseWriter, r *http.Request, upstream io.ReadCloser,
 	}
 
 	if !firstEventAt.IsZero() {
-		observability.AIStreamTTFT.WithLabelValues("stream").
+		// C7：model 标签填真实模型名，别恒为 "stream"，否则无法按模型拆 TTFT。
+		observability.AIStreamTTFT.WithLabelValues(model).
 			Observe(firstEventAt.Sub(start).Seconds())
 	}
 	observability.AIStreamDuration.Observe(time.Since(start).Seconds())

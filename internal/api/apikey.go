@@ -93,6 +93,14 @@ func (h *Handler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	k.ID = id
+	// S8：status 只允许 active / disabled，空则回填 active，避免写入脏数据。
+	if k.Status == "" {
+		k.Status = "active"
+	}
+	if k.Status != "active" && k.Status != "disabled" {
+		writeError(w, http.StatusBadRequest, "status must be active or disabled")
+		return
+	}
 	if k.QPSLimit <= 0 {
 		k.QPSLimit = 100
 	}

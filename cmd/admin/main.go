@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"flag"
 	"log"
 	"net/http"
@@ -25,7 +26,8 @@ func main() {
 
 	// 命令行参数：数据库连接串 + 监听地址
 	dsn := flag.String("dsn", "", "数据库连接字符串（默认读 DATABASE_URL）")
-	addr := flag.String("addr", ":8092", "管理服务监听地址")
+	addr := flag.String("addr", "127.0.0.1:8092", "管理服务监听地址（默认仅本机）")
+	adminKey := flag.String("admin-key", "", "管理面静态鉴权 key（空 = 不鉴权，仅限本地开发）")
 	flag.Parse()
 
 	// 未通过 -dsn 指定时，从环境变量读取（与 gateway 一致）
@@ -58,9 +60,15 @@ func main() {
 	mux := http.NewServeMux()
 	apiHandler.RegisterRoutes(mux)
 
+	// S1：控制面有增删改 / publish / 返回明文 key 的权限，必须鉴权。
+	var handler http.Handler = mux
+	if *adminKey != "" {
+		handler = requireAdminKey(*adminKey, mux)
+	}
+
 	srv := &http.Server{
 		Addr:    *addr,
-		Handler: mux,
+		Handler: handler,
 	}
 
 	// 在独立 goroutine 里监听，主 goroutine 等待退出信号
@@ -84,4 +92,15 @@ func main() {
 		log.Printf("admin 优雅关闭失败: %v", err)
 	}
 	log.Println("admin 已退出")
+}
+
+// requireAdminKey 给管理面加静态鉴权：X-Admin-Key 必须与启动参数一致（常数时间比较）。
+func requireAdminKey(key string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Admin-Key")), []byte(key)) != 1 {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

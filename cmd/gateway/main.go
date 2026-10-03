@@ -49,7 +49,10 @@ func main() {
 		log.Fatal("REDIS_ADDR 未设置")
 	}
 
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     redisAddr,
+		Password: os.Getenv("REDIS_PASSWORD"), // S6：Redis 加密码
+	})
 
 	versionStore := postgres.NewVersionStore(db)
 	router := gateway.NewRouter()
@@ -63,6 +66,7 @@ func main() {
 	aiConfigPath := flag.String("ai-config", "ai.yaml", "AI Gateway 配置文件路径")
 	burst := flag.Float64("burst", 200, "令牌桶容量，允许的最大突发请求数")
 	failMode := flag.String("fail-mode", "fallback", "Redis 故障时的策略:closed / fallback / open")
+	pprof := flag.Bool("pprof", false, "启用 pprof 调试端点(默认关闭, 仅 127.0.0.1)")
 	flag.Parse()
 
 	if *burst <= 0 {
@@ -204,12 +208,14 @@ func main() {
 		Handler: handler,
 	}
 
-	go func() {
-		log.Println("pprof listen :6060")
-		if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
-			log.Fatal(err)
-		}
-	}()
+	if *pprof {
+		go func() {
+			log.Println("pprof listen 127.0.0.1:6060")
+			if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
+				log.Fatal(err)
+			}
+		}()
+	}
 
 	go func() {
 		mux := http.NewServeMux()

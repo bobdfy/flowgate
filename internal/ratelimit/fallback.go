@@ -46,6 +46,9 @@ func (f *FallbackLimiter) Allow(ctx context.Context, key string, limit int64) (b
 	return false, nil
 }
 
+// FailMode 返回当前失败模式，供限流中间件在 limiter 报错时决定放行还是拒绝。
+func (f *FallbackLimiter) FailMode() FailMode { return f.mode }
+
 func (f *FallbackLimiter) RetryAfter(key string, limit int64) time.Duration {
 	if p, ok := f.primary.(RetryAfterProvider); ok {
 		return p.RetryAfter(key, limit)
