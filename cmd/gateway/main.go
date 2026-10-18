@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"log"
@@ -31,7 +32,13 @@ func main() {
 	godotenv.Load()
 
 	// JSON 输出到 stdout (把日志系统输出成 JSON 格式)
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	//
+	// ★ 性能关键：不能直接写 os.Stdout。slog 每次日志都是一次 syscall，
+	// 压测时 access_log 每请求写一次 stdout 会变成最大 CPU 热点（实测 ~30%）。
+	// 用 bufio.Writer 把小块 JSON 攒成 64KB 批量落盘，后台 goroutine 定时 flush，
+	// 把每请求一次的 WSASend 系统调用降为「几乎纯内存写」。
+	logWriter := bufio.NewWriterSize(os.Stdout, 64*1024)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logWriter, nil)))
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -66,6 +73,7 @@ func main() {
 	aiConfigPath := flag.String("ai-config", "ai.yaml", "AI Gateway 配置文件路径")
 	burst := flag.Float64("burst", 200, "令牌桶容量，允许的最大突发请求数")
 	failMode := flag.String("fail-mode", "fallback", "Redis 故障时的策略:closed / fallback / open")
+	authCacheTTL := flag.Duration("auth-cache-ttl", 0, "鉴权结果进程内缓存 TTL（>0 启用；0 关闭）")
 	pprof := flag.Bool("pprof", false, "启用 pprof 调试端点(默认关闭, 仅 127.0.0.1)")
 	flag.Parse()
 
@@ -82,7 +90,13 @@ func main() {
 
 	apiKeyStore := postgres.NewAPIKeyStore(db)
 
-	authenticator := middleware.NewAuthenticator(apiKeyStore)
+	var authenticator *middleware.Authenticator
+	if *authCacheTTL > 0 {
+		authenticator = middleware.NewAuthenticatorWithCache(apiKeyStore, *authCacheTTL)
+		slog.Info("auth_cache_enabled", "ttl", authCacheTTL.String())
+	} else {
+		authenticator = middleware.NewAuthenticator(apiKeyStore)
+	}
 
 	tenantKey := func(r *http.Request) (string, int64) {
 		if id, ok := middleware.FromContext(r.Context()); ok {
@@ -96,6 +110,14 @@ func main() {
 			return "key:" + strconv.FormatInt(id.KeyID, 10), id.KeyQPS
 		}
 		return "anonymous", 100
+	}
+
+	// p租户级 + Key 级合并
+	// 顺序：key1=租户（先判、更粗），key2=Key（后判、更细）。
+	pairKey := func(r *http.Request) (string, int64, string, int64) {
+		k1, l1 := tenantKey(r)
+		k2, l2 := apiKey(r)
+		return k1, l1, k2, l2
 	}
 
 	pools := map[int64]*loadbalance.NodePool{}
@@ -130,6 +152,29 @@ func main() {
 
 	hcCtx, hcCancel := context.WithCancel(context.Background())
 	defer hcCancel()
+
+	// 观测类后台 goroutine 的根 ctx（连接池采样等）。
+	// 单独一个而不是复用 hcCtx：语义不同，健康检查归健康检查、观测归观测，
+	statsCtx, statsCancel := context.WithCancel(context.Background())
+	defer statsCancel()
+
+	// 日志缓冲 flush goroutine：每 200ms 把攒下的日志刷到 stdout。
+	// 200ms 的延迟对运维日志可接受；极端情况进程被杀最多丢最后 200ms 日志。
+	logCtx, logCancel := context.WithCancel(context.Background())
+	defer logCancel()
+	go func() {
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_ = logWriter.Flush()
+			case <-logCtx.Done():
+				_ = logWriter.Flush()
+				return
+			}
+		}
+	}()
 
 	//记录已启动的健康检查的池
 	started := map[int64]bool{}
@@ -179,12 +224,9 @@ func main() {
 	handler := middleware.RequestID(
 		middleware.Logging(
 			authenticator.RequireAuth(
-				middleware.RateLimit(
-					Limiter, tenantKey, middleware.RateLimit(
-						Limiter, apiKey, buildAIRouter(
-							*aiCfg, router),
-						errorResponder,
-					),
+				middleware.RateLimitPair(
+					Limiter, pairKey, buildAIRouter(
+						*aiCfg, router),
 					errorResponder,
 				),
 				errorResponder,
@@ -202,6 +244,10 @@ func main() {
 			router.ReportMetrics()
 		}
 	}()
+
+	// H1-a：连接池采样（每秒一次 pool.Stat()）。
+	// 用于定位"连续压测 QPS 逐轮劣化、重启即恢复"——如果劣化来自连接池，
+	go postgres.StartPoolStats(statsCtx, db, time.Second)
 
 	srv := &http.Server{
 		Addr:    *addr,
@@ -246,5 +292,8 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("gateway 优雅关闭失败: %v", err)
 	}
+	// 停掉 flush goroutine 并最后一次刷盘，确保缓冲区里的日志不丢。
+	logCancel()
+	_ = logWriter.Flush()
 	log.Println("gateway 已退出")
 }

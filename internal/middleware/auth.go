@@ -4,20 +4,34 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/bobdfy/flowgate/internal/identity"
 	"github.com/bobdfy/flowgate/internal/store/postgres"
 )
 
 // Authenticator 鉴权器, 依赖 APIKeyStore 查库。
+// 内建进程内 TTL 缓存：hash → APIKey（含负缓存）
 type Authenticator struct {
-	keys *postgres.APIKeyStore
+	keys  *postgres.APIKeyStore
+	cache *authCache
 }
 
-// NewAuthenticator 创建一个鉴权器。
+// NewAuthenticator 创建一个鉴权器（默认关闭缓存，保持旧行为）。
 func NewAuthenticator(keys *postgres.APIKeyStore) *Authenticator {
 	return &Authenticator{
 		keys: keys,
+		// ttl=0 → 缓存禁用，每请求都查库。
+		cache: newAuthCache(0),
+	}
+}
+
+// NewAuthenticatorWithCache 创建一个带鉴权缓存的鉴权器。
+// ttl 是缓存有效期；<=0 时退化为 NewAuthenticator（缓存禁用）
+func NewAuthenticatorWithCache(keys *postgres.APIKeyStore, ttl time.Duration) *Authenticator {
+	return &Authenticator{
+		keys:  keys,
+		cache: newAuthCache(ttl),
 	}
 }
 
@@ -45,12 +59,35 @@ func (a *Authenticator) RequireAuth(next http.Handler, responder ErrorResponder)
 			return
 		}
 
-		k, err := a.keys.GetByHash(r.Context(), HashKey(key))
+		hash := HashKey(key)
+
+		// 先查进程内缓存：命中直接短路，省掉一次 PostgreSQL 往返。
+		// 负缓存也参与 —— hit=true 且 k=nil 表示「确定查无」。
+		if k, hit := a.cache.get(hash); hit {
+			if k == nil {
+				slog.Warn("auth_invalid_key", "path", r.URL.Path)
+				fail(w, r, http.StatusUnauthorized, "API Key 无效或已停用")
+				return
+			}
+			ctx := identity.WithIdentity(r.Context(), &identity.Identity{
+				TenantID:  k.TenantID,
+				KeyID:     k.ID,
+				TenantQPS: k.TenantQPSLimit,
+				KeyQPS:    k.QPSLimit,
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		k, err := a.keys.GetByHash(r.Context(), hash)
 		if err != nil {
 			slog.Error("auth_lookup_failed", "err", err)
 			fail(w, r, http.StatusInternalServerError, "鉴权查询失败")
 			return
 		}
+
+		// 无论命中与否都写缓存（含负缓存），避免无效 key 打穿数据库。
+		a.cache.put(hash, k)
 
 		if k == nil {
 			slog.Warn("auth_invalid_key", "path", r.URL.Path)
@@ -59,8 +96,7 @@ func (a *Authenticator) RequireAuth(next http.Handler, responder ErrorResponder)
 		}
 
 		// 把身份写进 context，下游（限流 / AI 网关 / 用量记录）从这里取。
-		// 用 identity.WithIdentity 而不是直接 context.WithValue：
-		// context key 是 identity 包的私有类型，只有它自己能写。
+		// 用 identity.WithIdentity 而不是直接 context.WithValue
 		ctx := identity.WithIdentity(r.Context(), &identity.Identity{
 			TenantID:  k.TenantID,
 			KeyID:     k.ID,

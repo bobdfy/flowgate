@@ -173,7 +173,7 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// ★两层护栏的获取顺序是硬约束：路由级先（外），服务级后（内）
+	// 两层护栏的获取顺序是硬约束：路由级先（外），服务级后（内）
 	release, err := best.guard.Acquire(req.Context())
 	if err != nil {
 		rejectOverload(w, err, "route", best.pattern, func(reason string) {
@@ -240,9 +240,9 @@ func (r *Router) Backends() []*Backend {
 
 // ReportMetrics 刷新路由级并发水位。
 //
-// ★ 只刷 Gauge（水位），不刷 Counter —— Counter 在拒绝时 +1，不需要轮询。
+// 只刷 Gauge（水位），不刷 Counter —— Counter 在拒绝时 +1，不需要轮询。
 //
-// ★ 已知限制：如果两条路由的 path_pattern 相同（不同 host 的同名路径），
+// 已知限制：如果两条路由的 path_pattern 相同（不同 host 的同名路径），
 // 它们会写同一个 label 值，后者覆盖前者。V3 范围里不处理
 // （我们的路由 pattern 是唯一的），但要知道有这个边界。
 func (r *Router) ReportMetrics() {

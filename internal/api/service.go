@@ -40,12 +40,12 @@ func (h *Handler) CreateService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if svc.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
+	// Name 必填 + 治理参数默认值。Update 走同一份规则：
+	// PUT 不带 name 会把服务名写空，admin 列表里变成一条无名记录。
+	if err := validateServiceForWrite(&svc); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
-	applyServiceDefaults(&svc)
 
 	if err := h.services.Create(r.Context(), &svc); err != nil {
 		log.Println("create service error", err)
@@ -109,7 +109,10 @@ func (h *Handler) UpdateService(w http.ResponseWriter, r *http.Request) {
 	// 关键：id 以 URL 为准，覆盖 body 里可能带的错误值
 	svc.ID = id
 
-	applyServiceDefaults(&svc)
+	if err := validateServiceForWrite(&svc); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	if err := h.services.Update(r.Context(), &svc); err != nil {
 		log.Println("update service failed", err)

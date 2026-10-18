@@ -47,11 +47,23 @@ func newTransport(svc model.Service) *http.Transport {
 		connect = 3 * time.Second
 	}
 
+	// 连接池上限必须显式设置，且 ≥ 服务的 max_concurrency：
+	// 否则并发一超上限，多出来的请求会被临时拨号、用完即关，
+	// 产生连接抖动（连续压测逐轮劣化的根因）。
+	// max_concurrency=0（不限流）时给一个兜底上限。
+	maxPerHost := svc.MaxConcurrency
+	if maxPerHost <= 0 {
+		maxPerHost = 512
+	}
+
 	return &http.Transport{
 		DialContext: (&net.Dialer{Timeout: connect}).DialContext, // 建连超时(TCP 三次握手)
 		// 空闲连接保活
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: time.Duration(svc.ResponseHeaderTimeoutMs) * time.Millisecond,
+
+		MaxIdleConns:        maxPerHost,
+		MaxIdleConnsPerHost: maxPerHost,
 	}
 
 }
@@ -70,10 +82,6 @@ func (c *ProxyCache) get(u *url.URL, svc model.Service) *http.Transport {
 }
 
 // 把入站请求改造后发一次给上游，返回上游响应。 只发一次，不做重试。
-// ReverseProxy 拿到响应就立刻 stream 给客户端，写了就没法重试。
-//
-//	这里只做 RoundTrip，把「响应输出」留给调用方，
-//	这样「重试决策」和「响应输出」才能解耦。
 func forwardOnce(transport *http.Transport, req *http.Request, target *url.URL) (*http.Response, error) {
 	outReq := req.Clone(req.Context())
 
@@ -85,7 +93,7 @@ func forwardOnce(transport *http.Transport, req *http.Request, target *url.URL) 
 
 	removeByHopHeaders(outReq.Header)
 
-	// S4：覆盖客户端伪造的 X-Forwarded-For / X-Real-IP，统一由网关填真实来源。
+	// 覆盖客户端伪造的 X-Forwarded-For / X-Real-IP，统一由网关填真实来源。
 	if ip, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
 		outReq.Header.Del("X-Forwarded-For")
 		outReq.Header.Del("X-Real-IP")

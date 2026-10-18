@@ -3,8 +3,7 @@ package sse
 import "slices"
 
 const (
-	// maxIncompleteEventBytes 是单个未完成事件的上限（1 MiB）。
-	// 超过则丢弃该后缀并进入 RESYNC
+	// 单个未完成事件的上限，超过则丢弃该后缀并进入 RESYNC
 	maxIncompleteEventBytes = 1 << 20
 
 	// maxDelimiterBytes 最长分隔符"\r\n\r\n"
@@ -78,8 +77,7 @@ func (f *Framer) Frame(chunk []byte) (events [][]byte) {
 
 }
 
-// Flush 在 isLastChunk 时调用：把保留的未终止尾部作为一个事件发射，
-// 并重置分帧器状态。
+// Flush 在 isLastChunk 时调用：把保留的未终止尾部作为一个事件发射，并重置分帧器状态。
 func (f *Framer) Flush() []byte {
 	tail := f.tail
 	f.tail = nil
@@ -132,10 +130,6 @@ func (s sseByteWindow) lineEndingEnd(i int) (end int, pending bool) {
 }
 
 // scanEventEnds 从偏移 0 开始扫描窗口，返回每个完整事件的结束偏移
-// 一个事件分隔符 = 两个连续的行尾。要识别的形式：
-//
-//	"\n\n"  "\r\n\r\n"  "\n\r\n"  "\r\n\n"  以及裸 CR 参与的混合形式
-//
 // limit > 0 时最多返回 limit 个偏移（RESYNC 只需要找第一个分隔符）。
 // 可能以 pending 的 '\r' 结尾（它的归属要看下一个 chunk）。
 func (s sseByteWindow) scanEventEnds(limit int) []int {
@@ -176,7 +170,6 @@ func (s sseByteWindow) scanEventEnds(limit int) []int {
 
 // sliceRange 返回 w[from:to] 的一份新拷贝，用于保留的 tail、
 // RESYNC 的 carry，以及跨边界的事件。
-// 结果绝不能 alias 调用方的 chunk（宿主会复用那个缓冲区）。
 func (s sseByteWindow) sliceRange(from, to int) []byte {
 	out := make([]byte, 0, to-from)
 	if from >= len(s.a) {
@@ -199,8 +192,6 @@ func (s sseByteWindow) lastBytes(from, k int) []byte {
 }
 
 // normalizeEvent 把事件的行尾统一成 LF，并剥掉末尾的空行。
-// 注意这里是"逐字节扫描"而不是 strings.ReplaceAll，
-// 因为只处理 \r\n 与裸 \r 两种需要转换的情形，且要避免为每次替换分配新串。
 func normalizeEvent(ev []byte) []byte {
 	// 快速路径：绝大多数事件里没有 '\r'，直接原地修掉末尾换行即可。
 	hasCR := slices.Contains(ev, '\r')

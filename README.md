@@ -58,10 +58,10 @@
 | 4 | **三态熔断器** | ② | 节点级 Closed / Open / HalfOpen；冷却期**惰性**转半开（省掉每节点一个定时器） |
 | 5 | **主动 + 被动健康检查** | ② | `/health` 定时探测 + 请求结果反馈，把故障节点摘出可用列表 |
 | 6 | **两级并发护栏** | ③ | 服务级保护上游、路由级实现隔离（一条慢接口占不满整个服务的并发）；三档策略 fail-fast / wait / drop |
-| 7 | **分布式限流** | — | Redis + Lua 滑动窗口保证多实例配额一致；Redis 故障时降级到本地令牌桶（三档策略） |
+| 7 | **分布式限流** | — | Redis + Lua 滑动窗口保证多实例配额一致；租户 + Key 双层配额**合并为一次 Lua 原子判定**；Redis 故障时降级到本地令牌桶（三档策略） |
 | 8 | **Provider 适配层** | ④ | 厂商密钥只配在网关侧，业务系统不接触；以 OpenAI 兼容协议接入多家大模型，厂商差异由适配器抹平 |
 | 9 | **SSE 流式分帧** | ④ | 网络分块不按事件边界切，需跨块重建事件边界；末尾遗漏事件要补发（否则 token 用量统计整批丢失） |
-| 10 | **鉴权与配额** | ③④ | API Key 认证（SHA256 存储）+ 租户级 / Key 级双层 QPS，把配额落到具体客户 |
+| 10 | **鉴权与配额** | ③④ | API Key 认证（SHA256 存储 + 进程内 TTL 缓存，含正/负缓存）+ 租户级 / Key 级双层 QPS，把配额落到具体客户 |
 
 ---
 
@@ -91,9 +91,8 @@
    客户端 / 业务方        │               （数据面，无状态）                │
   (携带 X-API-Key)       │                                               │
         │                │   RequestID → Logging                         │
-        │  ① 请求         │     → RequireAuth          ──► 查 PostgreSQL  │
-        └───────────────►│     → RateLimit(租户)       ──► 查 Redis      │
-                         │     → RateLimit(Key)                          │
+        │  ① 请求         │     → RequireAuth          ──► PG（TTL 缓存）   │
+        └───────────────►│     → RateLimitPair  ──► Redis（一次 Lua）       │
                          │     → 分流                                    │
                          │        ├─► AI Handler ─────────► 大模型 API    │
                          │        └─► Router → 匹配路由（atomic.Value 快照）│
@@ -104,7 +103,7 @@
                          │              → 转发 ────────────► 上游服务      │
                          └───────────────────────────────────────────────┘
                                                   │
-                    ② 每请求查询                   │              ③ 转发
+                ② 每请求查 Redis（PG 走缓存）        │              ③ 转发
               ┌───────────────────┬───────────────┴──────────────┐
               ▼                   ▼                              ▼
       ┌───────────────┐   ┌───────────────┐            ┌──────────────────┐
@@ -134,7 +133,7 @@
 | 编号 | 流向 | 说明 |
 |---|---|---|
 | ① | 客户端 → 网关 | 请求入口，携带 `X-API-Key` |
-| ② | 网关 → PG / Redis | **每个请求都会查**：PG 做鉴权，Redis 做限流 |
+| ② | 网关 → PG / Redis | Redis **每请求一次**：租户 + Key 双层配额合并在一个 Lua 里原子判定；PG 做鉴权但走进程内 TTL 缓存，**命中时不查库**（最终一致，TTL 可配） |
 | ③ | 网关 → 上游 | 普通路径走 HTTP 后端；AI 路径走 AI Handler → 大模型 API |
 | ④ | admin → PG | 配置发布写入新版本快照；网关轮询版本号决定是否刷新路由表 |
 
@@ -145,7 +144,10 @@
 > AI 请求：分流 → AI Handler → HTTP 转发（含 SSE 流式分帧）
 > ```
 >
-> 两者都走完整的 `RequestID → Logging → RequireAuth → RateLimit(租户) → RateLimit(Key)`。
+> 两者都走完整的 `RequestID → Logging → RequireAuth（TTL 缓存）→ RateLimitPair（一次 Lua）`。
+>
+> 缓存与 Lua 都属于**最终一致**的取舍：鉴权缓存让"停用 key 最多 TTL 秒后才全量生效"，
+> 与路由表"5 秒轮询版本号"的模型一致；换来的稳态收益见 [性能测试结果](#性能测试结果)。
 
 ---
 
@@ -161,7 +163,7 @@ cmd/
 internal/
   gateway/        反向代理核心（路由匹配 + 转发编排 + 重试退避）
   loadbalance/    加权轮询 + 健康检查 + 三态熔断状态机
-  middleware/     中间件链（RequestID / 日志 / 鉴权 / 限流 / 错误响应分流）
+  middleware/     中间件链（RequestID / 日志 / 鉴权+TTL缓存 / 合并限流 / 错误响应分流）
   overload/       并发护栏（三档策略 + 热更新，零依赖）
   sse/            SSE 字节级分帧器（跨块拼接 / 悬挂 CR / RESYNC / 末尾补发）
   ai/             AI 网关（模型路由 + Provider 抽象 + 流式转发）
@@ -177,35 +179,29 @@ migrations/       SQL 建表脚本（001_init.sql 含完整表结构）
 tools/
   loadgen/        并发压测器（精确控制并发数与每请求超时）
   disconnect-test/ 验证「客户端断开 → 网关停止转发 → 上游停止生成」
-deploy/           docker-compose（PostgreSQL 16 + Redis）
+deploy/           docker-compose（postgres + redis + gateway + admin）
+Dockerfile        多阶段构建（gateway/admin/mock/mockai 共用一个，ARG BIN 区分）
+.dockerignore     构建上下文排除清单（密钥 / 缓存）
 ai.yaml           AI Provider 与模型配置
-```
-
-**读代码建议从这三个零依赖的包入手**（它们不依赖项目内任何其他包，
-可以独立看懂，也有单元测试）：
-
-```
-internal/overload/     并发护栏 —— 三档策略、channel 信号量、热更新
-internal/sse/          SSE 分帧状态机 —— 四个字节级边界问题
-internal/identity/     身份模型 —— 最简，适合先热身
 ```
 
 ---
 
 ## 一次请求完整链路
 
-1. RequestID 生成唯一 ID (写进响应头 + 日志)
-2. Logging 开始计时
-3. RequireAuth 检验X-API-Key -> 注入身份到context
-4. RateLimit(租户) 按租户配额判
-5. RateLimit(Key)  按 Key 配额判
-6. 分流            AI 路径 → AI Handler；其余 → Router
-7. 匹配路由        从当前快照匹配 host + path + method
-8. 路由级 Guard    并发护栏（入口），满了直接 503
-9. 选实例          加权轮询 + 健康检查过滤 + 熔断状态过滤
-10. 服务级 Guard   并发护栏（出口）
-11. 分层超时 + 转发（含幂等重试 + 退避）
-12. 错误分类处理   连接拒绝→502 / 超时→504 / 无健康节点→503
+1. RequestID  生成唯一 ID（写进响应头 + 日志）
+2. Logging    开始计时（日志经 64KB 缓冲后台批量落盘）
+3. RequireAuth  校验 X-API-Key → 注入身份到 context
+               命中进程内 TTL 缓存时**不查库**；含负缓存，防无效 key 打穿 DB
+4. RateLimitPair 租户 + Key 双层配额，**一次 Redis Lua 原子判定**（2 次往返 → 1 次）
+               Redis 故障时降级到本地令牌桶
+5. 分流       AI 路径 → AI Handler；其余 → Router
+6. 匹配路由    从当前快照匹配 host + path + method
+7. 路由级 Guard  并发护栏（入口），满了直接 503
+8. 选实例      加权轮询 + 健康检查过滤 + 熔断状态过滤
+9. 服务级 Guard  并发护栏（出口）
+10. 分层超时 + 转发（含幂等重试 + 退避）
+11. 错误分类处理  连接拒绝→502 / 超时→504 / 无健康节点→503
 
 ---
 
@@ -233,52 +229,47 @@ internal/identity/     身份模型 —— 最简，适合先热身
 
 ## 一键运行
 
-前置：Go 1.26+、Docker。
+前置：Docker（方式二还需 Go 1.26+）。
 
-### 1. 启动依赖（PostgreSQL + Redis）
-
-`deploy/docker-compose.yml` 已配好两者，以下运行命令二选一：
+### 方式一：Docker 全容器（推荐）
 
 ```powershell
-# 方式一：不进目录，用 -f 指定文件
-docker compose -f F:\FlowGate\deploy\docker-compose.yml up -d
-
-# 方式二：进deploy目录（推荐，后续命令都不用带 -f）
 cd F:\FlowGate\deploy
-docker compose up -d
+docker compose up -d --build
 ```
 
-确认状态：`docker compose ps`（两个都应为 Up）
+一条命令拉起 4 个服务：
 
-> 注：compose 里 Redis 未设置密码；数据库连接字符串为 `flowgate/flowgate@localhost:5433/flowgate`。
+| 服务 | 端口 | 说明 |
+|---|---|---|
+| postgres | 5433 | 首次启动自动执行 `migrations/001_init.sql`（7 张表） |
+| redis | 6380 | 密码 `flowgate` |
+| gateway | 8090 / 9090 | 数据面 / metrics |
+| admin | 8092 | 管理面 |
 
-### 2. 建表
+验证：`docker compose ps`（四个都 Up）；查表 `docker exec flowgate-postgres psql -U flowgate -d flowgate -c "\dt"`（7 张表）。
+
+> 假上游 `mock` 是测试替身、不属于部署产物，不在 compose 里；联调/压测时本地另起 `go run ./cmd/mock -addr :8091`（AI 流式用 `go run ./cmd/mockai`）。
+
+> **mock 节点地址怎么填（跟跑法有关）**
+> - **方式一（Docker 全容器）**：网关在容器里，配置节点地址要填 `host.docker.internal:8091`
+>   （`127.0.0.1` 是容器自己，够不到宿主机上的 mock）；admin 需开 `ALLOW_PRIVATE_UPSTREAM=1`（compose 里已配）。
+> - **方式二（本地 `go run`）**：网关直接跑在宿主机，节点地址照常填 `127.0.0.1:8091`，不用改。
+
+### 方式二：本地开发（依赖 Docker 化，程序用 go run）
 
 ```powershell
-docker cp F:\FlowGate\migrations\001_init.sql flowgate-postgres:/tmp/001_init.sql
-docker exec flowgate-postgres psql -U flowgate -d flowgate -f /tmp/001_init.sql
+# 1. 只起依赖（表自动建）
+cd F:\FlowGate\deploy
+docker compose up -d postgres redis
+
+# 2. 三个进程，admin 先于 gateway
+# 终端 A：go run ./cmd/mock -addr :8091
+# 终端 B：go run ./cmd/admin        # :8092
+# 终端 C：go run ./cmd/gateway      # :8090
 ```
 
-> ★ 建议先把文件拷进容器再执行，不要用 `-i < 文件` 重定向 —— 避免 Windows 与控制台编码不一致导致中文注释乱码。
-
-验证：`docker exec flowgate-postgres psql -U flowgate -d flowgate -c "\dt"` 应列出 7 张表。
-
-### 3. 启动三个进程
-
- `admin` 要先于 `gateway` —— 网关启动时会立即读取"已发布的配置版本"。
-
-```powershell
-# 终端 A —— 假上游 :8091
-go run ./cmd/mock -addr :8091
-
-# 终端 B —— 管理面 :8092（先起这个）
-go run ./cmd/admin
-
-# 终端 C —— 数据面 :8090
-go run ./cmd/gateway
-```
-
-> 若要验证 AI 流式链路，需再起一个：`go run ./cmd/mockai`（:8095）
+> 数据库 `flowgate/flowgate@localhost:5433/flowgate`；redis `localhost:6380`（密码 `flowgate`，本地 `.env` 需配 `REDIS_PASSWORD=flowgate`）。
 
 > 完整的功能验证步骤（25 项，可直接照做）见 [验证清单.md](<验证清单.md>)。
 
@@ -309,32 +300,60 @@ go run ./cmd/gateway
 
 ## 性能测试结果
 
-**测试条件**：本机同机压测（压测程序与网关同一台电脑），50 并发，后端为自带回显型假服务，明文 HTTP，普通请求路径（非 AI）。
+> 2026-10-18 重测。工具、参数、机器信息全部记录，可复现。
 
-| 指标 | 经网关 | 直连后端 | 网关的开销 |
-|---|---|---|---|
-| 吞吐 | **1505 QPS** | 37662 QPS | 慢约 25 倍 |
-| P50 | **24.2 ms** | 0.7 ms | **+23.5 ms** |
-| P99 | **87.7 ms** | 7.1 ms | +80.6 ms |
-| 成功率 | 100% | 100% | — |
+### 测试环境（12 项参数）
 
-**这 23.5 毫秒是网关的"治理开销"**：鉴权（每请求查一次数据库）+ 限流（每请求问两次 Redis）。
-转发本身几乎不花时间 —— 这是设计上的取舍：多花 23 毫秒，换来统一的身份与配额治理。
+| 项 | 值 |
+|---|---|
+| CPU | Intel i5-12500H（12 核 16 线程） |
+| 内存 | 16 GB（压测端 / 网关 / 后端同机共享） |
+| 网络 | 压测端→网关 loopback（Docker 端口映射）；网关→Redis/mock 走 Docker 桥接 |
+| 压测工具 | bombardier v1.2.6（`go install`，复用连接，`-l` 输出百分位） |
+| 请求大小 | GET 无 body；响应约 300 字节 JSON |
+| TLS | 否（明文 HTTP） |
+| 数据库 | 参与（鉴权，走 TTL 缓存，预热后命中不查库） |
+| Redis | 参与（每请求一次 Lua 限流） |
+| 单机/多实例 | 单机、单实例 |
+| 并发设置 | bombardier `-c`（本测用 100 / 500） |
+| P50/P99 统计 | bombardier `-l` 的 Latency Distribution 50% / 99% 分位 |
+| 持续时长 | 每组固定 30 秒（`-d 30s`）× 2 轮，另加 5 秒预热 |
 
-**两个必须说明的前提**（否则数字会被用错地方）：
+### 结果（每组 2 轮，30 秒/轮）
 
+| 组 | 并发 | QPS | P50 | P99 | 总请求量（单轮 30s） |
+|---|---|---|---|---|---|
+| A 直连后端（绕过网关） | 100 | 59308 / 51324 | 1.12 / 1.03 ms | 9.43 / 10.79 ms | ≈177.9万 / ≈154.0万 |
+| B 经网关 | 100 | 4679 / 4938 | 17.82 / 17.82 ms | 75.28 / 54.53 ms | ≈14.0万 / ≈14.8万 |
+| C 经网关 | 500 | 6400 / 5825 | 70.52 / 73.82 ms | 215.99 / 269.79 ms | ≈19.2万 / ≈17.5万 |
+
+（全部 2xx，零错误。）
+
+### 结论
+
+后端是零成本的假服务，直连约 5.5 万 QPS 经网关后掉到约 4.8 千（**约 11 倍开销**），
+P50 从约 1ms 涨到约 18ms —— 这 17ms 几乎全是网关自身的治理开销（鉴权 + Redis 限流 + 转发），
+不是后端慢。500 并发时 QPS 升到约 6 千、但 P50 涨到约 70ms：并发把吞吐顶上去，排队也把单请求延迟顶上去。
+
+### 复现命令
+
+```powershell
+# 一次性装好工具
+go install github.com/codesenberg/bombardier@latest
+
+# A 直连后端
+bombardier -c 100 -d 30s -l http://127.0.0.1:8091/
+
+# B 经网关 @100 并发
+bombardier -c 100 -d 30s -l http://127.0.0.1:8090/ -H "X-API-Key: <key>"
+
+# C 经网关 @500 并发
+bombardier -c 500 -d 30s -l http://127.0.0.1:8090/ -H "X-API-Key: <key>"
 ```
-① 数字只在【重启 gateway 后的第一轮】成立
-   连续压测会逐次劣化：1505 → 931 → 480 QPS，重启后立即恢复
-   已排除热降频 / 端口耗尽 / goroutine 泄漏 / 内存泄漏 / 机器负载 / 数据库故障
 
-② 同一命令的波动可达 2.85 倍（QPS 从 664 到 1894）
-   → 单次测量不足以支撑任何结论，A/B 对比必须先确认可重复性
-```
+> 前置：网关跑在 Docker 里时，mock 的节点地址要指向 `host.docker.internal:8091`
+>（`127.0.0.1` 是容器自己，够不到宿主机的 mock），admin 需开 `ALLOW_PRIVATE_UPSTREAM=1`。
 
-**资源占用**：goroutine 16 个；内存 461 KB（三次采样完全相同，无泄漏迹象）。
-
-> 详细测量记录、六种原因的排除过程、以及一个被推翻的错误结论，见 [压测报告.md](<压测报告.md>)。
 
 ---
 
@@ -350,13 +369,6 @@ go run ./cmd/gateway
 | **未做多租户计费** | 只有配额限制，没有用量计费后台 |
 | **单实例验证** | 分布式限流支持多实例共享配额，但未做多实例集群压测 |
 
-### 已知缺陷
-
-| 缺陷 | 影响 | 状态 |
-|---|---|---|
-| **连续压测会逐次劣化** | 同一进程连压几轮后 QPS 从 1505 掉到 480，重启恢复；已排除 6 种原因，未完全定位 | 记录在 [压测报告.md](<压测报告.md>) 第四节 |
-| **租户更新会清空状态** | `PUT /api/v1/tenants/{id}` 不带 `status` 时会把状态写成空串，导致该租户所有 API Key 失效（报 `API Key 无效或已停用`） | 临时方案：请求体带上 `"status":"active"` |
-| **路由规则等长时优先级不明确** | 同 `host + path + match_type + methods` 的路由由主键顺序决定谁生效；已加创建/发布双重校验挡住新建，但存量数据需手工清理 | 已加防护 |
 
 ### AI 部分的范围
 
@@ -371,9 +383,11 @@ go run ./cmd/gateway
 
 ## 后续计划
 
-1. 定位"连续压测劣化"的根因（见已知缺陷）
-2. 学习 LLMLite 与 New API 的框架设计，完善 AI 网关的多厂商接入
-3. 性能优化：鉴权查库与两次限流 Redis 往返是当前延迟主体
+1. 连续压测劣化 —— **已完成**：定位为两类原因——压测端不复用连接耗尽自身端口 + 网关连接池上限小于并发数；后者已改为动态跟随 `max_concurrency`
+2. 性能优化 —— **已落地**：鉴权 TTL 缓存、限流合并（两次 Redis 往返 → 一次 Lua）、日志缓冲、连接池参数、指标基数收敛
+3. 压 AI 流式接口（`/v1/chat/completions`）—— **待做**：补上未覆盖的部分，拿 TTFT 与流式吞吐数据
+4. 长时 / 真实负载 / 多实例压测 —— 验证连接池参数在恶劣场景的收益，以及分布式限流的多实例配额一致性
+5. 学习 LLMLite 与 New API 的框架设计，完善 AI 网关的多厂商接入
 
 ---
 

@@ -12,15 +12,58 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowgate"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
   
   redis:
-    image: redis
+    image: redis:8-alpine
     container_name: flowgate-redis
+    command: ["redis-server", "--requirepass", "flowgate"]
     ports:
       - "6380:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "flowgate", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      
+  gateway:
+    build: 
+      context: ..
+      args:
+        BIN: gateway
+    container_name: flowgate-gateway
+    environment:
+      DATABASE_URL: postgres://flowgate:flowgate@postgres:5432/flowgate
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: flowgate
+    ports:
+      - "8090:8090"
+      - "9090:9090"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
 
+  admin:
+    build: 
+      context: ..
+      args:
+        BIN: admin
+    container_name: flowgate-admin
+    command: ["-addr", ":8092"]
+    environment:
+      DATABASE_URL: postgres://flowgate:flowgate@postgres:5432/flowgate
+      ALLOW_PRIVATE_UPSTREAM: "1"
+    ports: 
+      - "8092:8092"
+    depends_on:
+      postgres: { condition:  service_healthy }
 volumes:
   postgres_data:
   redis_data:

@@ -77,7 +77,7 @@ var (
 	)
 
 	// 过载拒绝数（Counter）
-	// ★ label 用有界值：service 名有限，reason 是枚举（fail_fast / queue_full /
+	// label 用有界值：service 名有限，reason 是枚举（fail_fast / queue_full /
 	//   queue_timeout / queue_timeout_drop）。绝不能放 path / API Key。
 	OverloadRejectedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -122,6 +122,130 @@ var (
 		},
 		[]string{"route"},
 	)
+
+	// ===================== PostgreSQL 连接池（pgxpool）观测 =====================
+	//
+	// 为什么要有这组指标：为了定位「同一进程连续压测，QPS 逐轮劣化、重启即恢复」。
+	// 这个现象最可能的形态之一就是连接池问题 —— 池被打满导致排队，
+	// 或冷启动时 50 个并发逐个建连。而这两件事在此之前是完全不可见的：
+	// 压测报告 §4.4 记录了「每轮约有 50 个请求卡 1.1 秒」，这个数字和并发数相同，
+	// 高度疑似首次建连的耗时，但当时没有数据能证实。
+	//
+	// ★ 采样方式：后台 goroutine 每秒读一次 pool.Stat()（快照语义，读一次成本低）。
+	//   瞬时量（连接数）用 Gauge.Set；累计量（次数/耗时）只上报两次采样之间的
+	//   增量，用 Counter.Add —— 这样 rate() 语义才正确，
+	//   也避免直接把快照值当 Counter 用导致的口径混乱。
+	//
+	// ★ 判断劣化是否来自连接池，看这两个就够：
+	//   - flowgate_pgxpool_empty_acquires_total：取连接时池已空、必须等待的次数。
+	//     稳态应当恒为 0；它一涨，说明连接数不够或连接被长时间占用。
+	//   - flowgate_pgxpool_new_conns_total：累计新建连接数。
+	//     它和压测轮次同步增长，就坐实了「每轮都在重新建连」的假设。
+
+	// 当前被占用的连接数（Gauge：看水位）
+	PGPoolAcquiredConns = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "flowgate_pgxpool_acquired_conns",
+			Help: "连接池中当前被占用的连接数",
+		},
+	)
+
+	// 当前空闲连接数
+	PGPoolIdleConns = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "flowgate_pgxpool_idle_conns",
+			Help: "连接池中当前空闲的连接数",
+		},
+	)
+
+	// 池中连接总数（= 占用 + 空闲 + 正在建立）
+	PGPoolTotalConns = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "flowgate_pgxpool_total_conns",
+			Help: "连接池中当前的连接总数（占用+空闲+建立中）",
+		},
+	)
+
+	// 正在建立中的连接数（冷启动时这个会飙）
+	PGPoolConstructingConns = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "flowgate_pgxpool_constructing_conns",
+			Help: "连接池中正在建立（握手）中的连接数",
+		},
+	)
+
+	// 池上限，方便在图上直接对比水位和上限
+	PGPoolMaxConns = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "flowgate_pgxpool_max_conns",
+			Help: "连接池上限",
+		},
+	)
+
+	// 取连接成功的累计次数
+	PGPoolAcquiresTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowgate_pgxpool_acquires_total",
+			Help: "从连接池取连接成功的累计次数",
+		},
+	)
+
+	// ★ 关键指标：取连接时池已空、需要等待别人释放或新建连接的累计次数。
+	// 稳态下应当恒为 0；它开始增长 = 连接池成了瓶颈。
+	PGPoolEmptyAcquiresTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowgate_pgxpool_empty_acquires_total",
+			Help: "取连接时池已空、必须等待的累计次数（稳态应为 0，增长即表示池不够用）",
+		},
+	)
+
+	// 取连接被 context 取消的累计次数（客户端断开 / 超时）
+	PGPoolCanceledAcquiresTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowgate_pgxpool_canceled_acquires_total",
+			Help: "取连接时被 context 取消的累计次数",
+		},
+	)
+
+	// 累计新建连接数（冷启动假设的核心证据）
+	PGPoolNewConnsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowgate_pgxpool_new_conns_total",
+			Help: "累计新建的物理连接数（持续增长说明连接在反复建立，而非复用）",
+		},
+	)
+
+	// 因超过 MaxConnLifetime 被销毁的连接数
+	PGPoolDestroyedLifetimeTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowgate_pgxpool_destroyed_lifetime_total",
+			Help: "因超过最大存活时间而被销毁的连接数",
+		},
+	)
+
+	// 因超过 MaxConnIdleTime 被销毁的连接数
+	PGPoolDestroyedIdleTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowgate_pgxpool_destroyed_idle_total",
+			Help: "因空闲过久而被销毁的连接数",
+		},
+	)
+
+	// 取连接的累计耗时（秒）
+	PGPoolAcquireSecondsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowgate_pgxpool_acquire_seconds_total",
+			Help: "取连接的累计耗时（秒）",
+		},
+	)
+
+	// 因池空而等待的累计耗时（秒）—— 这个才是"连接不够"的直接代价
+	PGPoolEmptyAcquireWaitSecondsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowgate_pgxpool_empty_acquire_wait_seconds_total",
+			Help: "因连接池为空而等待的累计耗时（秒）",
+		},
+	)
 )
 
 func init() {
@@ -139,5 +263,19 @@ func init() {
 		QueueDepth,
 		BulkheadInflight,
 		BulkheadRejectedTotal,
+		// PostgreSQL 连接池观测
+		PGPoolAcquiredConns,
+		PGPoolIdleConns,
+		PGPoolTotalConns,
+		PGPoolConstructingConns,
+		PGPoolMaxConns,
+		PGPoolAcquiresTotal,
+		PGPoolEmptyAcquiresTotal,
+		PGPoolCanceledAcquiresTotal,
+		PGPoolNewConnsTotal,
+		PGPoolDestroyedLifetimeTotal,
+		PGPoolDestroyedIdleTotal,
+		PGPoolAcquireSecondsTotal,
+		PGPoolEmptyAcquireWaitSecondsTotal,
 	)
 }

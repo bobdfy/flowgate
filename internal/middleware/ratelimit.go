@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"log/slog"
 	"math"
 	"net"
@@ -17,10 +18,18 @@ import (
 // 任何接收一个 *http.Request 参数、返回一个 string 的函数，都可以当作 KeyFunc 使用。
 type KeyFunc func(*http.Request) (string, int64)
 
+// PairKeyFunc 从请求里取两个限流维度（租户级 + Key 级）的 key 与限额
+type PairKeyFunc func(*http.Request) (key1 string, limit1 int64, key2 string, limit2 int64)
+
+// PairLimiter 支持一次原子检查两个限流维度的限流器。
+type PairLimiter interface {
+	AllowPair(ctx context.Context, key1 string, limit1 int64, key2 string, limit2 int64) (bool, int, error)
+}
+
 // ClientKey 默认 key 提取：优先 X-API-Key，其次客户端 IP（带来源前缀避免命名空间撞车）。
 func ClientKey(r *http.Request) (string, int64) {
 	if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
-		// S7：只把明文 key 的哈希当限流 key，避免明文进 Prometheus 标签。
+		// 只把明文 key 的哈希当限流 key，避免明文进 Prometheus 标签。
 		return "key:" + identity.HashKey(apiKey), 100
 	}
 
@@ -32,8 +41,7 @@ func ClientKey(r *http.Request) (string, int64) {
 
 }
 
-// RateLimit 限流中间件：key 超限返回 429（带 Retry-After）并且不调 next；
-// 限流器自身出错（分布式实现才可能）先记日志放行，阶段 4 再接 fail_mode。
+// RateLimit 限流中间件：key 超限返回 429并且不调 next；
 // 位置：包在 Router 外层，但在 RequestID / Logging 内层。
 func RateLimit(limiter ratelimit.Limiter, keyFn KeyFunc, next http.Handler, responder ErrorResponder) http.Handler {
 	if keyFn == nil {
@@ -54,7 +62,7 @@ func RateLimit(limiter ratelimit.Limiter, keyFn KeyFunc, next http.Handler, resp
 				"method", r.Method, // 记录请求方法
 				"path", r.URL.Path, // 记录请求路径
 			)
-			// S5：按 fail-mode 决定放行还是拒绝。open 模式（放行优先）下限流器自身也出错，
+			// 按 fail-mode 决定放行还是拒绝。open 模式（放行优先）下限流器自身也出错，
 			// 说明兜底也失效，此时应拒绝而非无条件放行。
 			if p, ok := limiter.(interface{ FailMode() ratelimit.FailMode }); ok && p.FailMode() == ratelimit.FailOpen {
 				if responder != nil {
@@ -68,7 +76,6 @@ func RateLimit(limiter ratelimit.Limiter, keyFn KeyFunc, next http.Handler, resp
 			return
 		}
 		if !allowed {
-			//limiter.(ratelimit.RetryAfterProvider) 是类型断言，判断 limiter 是否实现了 RetryAfterProvider 接口。
 			if p, ok := limiter.(ratelimit.RetryAfterProvider); ok {
 				if d := p.RetryAfter(key, limit); d > 0 {
 					secs := int(math.Ceil(d.Seconds()))
@@ -84,7 +91,66 @@ func RateLimit(limiter ratelimit.Limiter, keyFn KeyFunc, next http.Handler, resp
 				"request_id", r.Header.Get("X-Request-ID"),
 			)
 			// 返回 429 状态码和消息体
-			observability.RateLimitedTotal.WithLabelValues(key).Inc()
+			// 只写 scope 字面量，不写具体 key —— 避免高基数（与 metrics.go 注释一致）
+			observability.RateLimitedTotal.WithLabelValues("key").Inc()
+			if responder != nil {
+				responder(w, r, http.StatusTooManyRequests, "Too Many Requests")
+				return
+			}
+			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// RateLimitPair 合并限流中间件：一次 Redis 往返完成「租户级 + Key 级」两层限流。
+// 替代原来两层 RateLimit 的两次串行往返；任一维度超限回 429 且不调 next。
+func RateLimitPair(limiter PairLimiter, keyFn PairKeyFunc, next http.Handler, responder ErrorResponder) http.Handler {
+	if keyFn == nil {
+		panic("RateLimitPair: keyFn 不能为 nil")
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key1, limit1, key2, limit2 := keyFn(r)
+
+		start := time.Now()
+		allowed, blocked, err := limiter.AllowPair(r.Context(), key1, limit1, key2, limit2)
+		observability.RateLimitDuration.Observe(time.Since(start).Seconds())
+
+		if err != nil {
+			slog.Error("rate_limit_error", "err", err, "method", r.Method, "path", r.URL.Path)
+			if p, ok := limiter.(interface{ FailMode() ratelimit.FailMode }); ok && p.FailMode() == ratelimit.FailOpen {
+				if responder != nil {
+					responder(w, r, http.StatusServiceUnavailable, "rate limiter unavailable")
+					return
+				}
+				http.Error(w, "rate limiter unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if !allowed {
+			// 定位超限维度：1=租户，2=Key（对齐 Lua 脚本返回值）
+			scope := "tenant"
+			if blocked == 2 {
+				scope = "key"
+			}
+			if p, ok := limiter.(ratelimit.RetryAfterProvider); ok {
+				if d := p.RetryAfter(scope, limit1); d > 0 {
+					w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(d.Seconds()))))
+				}
+			}
+
+			slog.Warn("rate_limited",
+				"scope", scope,
+				"method", r.Method,
+				"path", r.URL.Path,
+				"request_id", r.Header.Get("X-Request-ID"),
+			)
+			// 只写 scope 字面量，不写具体 key —— 避免高基数（与 metrics.go 注释一致）
+			observability.RateLimitedTotal.WithLabelValues(scope).Inc()
 			if responder != nil {
 				responder(w, r, http.StatusTooManyRequests, "Too Many Requests")
 				return

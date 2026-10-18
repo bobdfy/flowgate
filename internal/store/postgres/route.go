@@ -187,19 +187,26 @@ func (r *RouteStore) List(ctx context.Context) ([]model.Route, error) {
 }
 
 // Update 按 ID 更新路由的可变字段。
+//
+// ★ 修过一个 bug：这条 SQL 原先的 SET 子句里没有 service_id，
+// 于是"把某条路由改挂到另一个服务"会返回 200 且 body 里显示新 service_id，
+// 但库里压根没改 —— 接口的响应和存储不一致，属于最难被发现的那类错误：
+// 调用方拿到成功响应，语义却没生效，只有重新 GET 一次才会暴露。
+// 现在 service_id 进入 SET，并在 api 层显式必填（见 internal/api/validate.go）。
 func (r *RouteStore) Update(ctx context.Context, route *model.Route) error {
 	cmdTag, err := r.pool.Exec(ctx,
 		`UPDATE gateway_routes 
-		 SET name = $1, 
-		 	host = $2,
-		     path_pattern = $3, 
-		     path_match_type = $4, 
-		     methods = $5, 
-		     enabled = $6, 
-		     max_concurrency = $7,
+		 SET service_id = $1,
+		     name = $2, 
+		 	 host = $3,
+		     path_pattern = $4, 
+		     path_match_type = $5, 
+		     methods = $6, 
+		     enabled = $7, 
+		     max_concurrency = $8,
 		     updated_at = now() 
-		 WHERE id = $8`,
-		route.Name, route.Host, route.PathPattern, route.PathMatchType,
+		 WHERE id = $9`,
+		route.ServiceID, route.Name, route.Host, route.PathPattern, route.PathMatchType,
 		route.Methods, route.Enabled, route.MaxConcurrency, route.ID,
 	)
 	if err != nil {

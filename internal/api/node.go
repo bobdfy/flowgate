@@ -5,8 +5,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
-	"os"
 	"strconv"
 
 	"github.com/bobdfy/flowgate/internal/model"
@@ -30,23 +28,9 @@ func (h *Handler) CreateNode(w http.ResponseWriter, r *http.Request) {
 	// 关键：serviceID 来自 URL，覆盖 body
 	node.ServiceID = serviceID
 
-	if node.Address == "" {
-		writeError(w, http.StatusBadRequest, "address is required")
-		return
-	}
-	// 地址必须带 scheme（gateway 的 parseUpstream 只兜底，这里要求完整 URL）
-	u, err := url.Parse(node.Address)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		writeError(w, http.StatusBadRequest, "address must be a full URL, e.g. http://localhost:8091")
-		return
-	}
-	// S2：只允许 http/https，并拦内网/回环地址，防止 SSRF（本地联调可用 ALLOW_PRIVATE_UPSTREAM=1 放开）。
-	if u.Scheme != "http" && u.Scheme != "https" {
-		writeError(w, http.StatusBadRequest, "address scheme must be http or https")
-		return
-	}
-	if os.Getenv("ALLOW_PRIVATE_UPSTREAM") != "1" && isPrivateHost(u.Hostname()) {
-		writeError(w, http.StatusBadRequest, "address points to a private/loopback host")
+	// 地址合法性（含 SSRF 拦截）走统一实现，Create / Update 共用同一份规则。
+	if err := validateNodeForWrite(&node); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -78,6 +62,14 @@ func (h *Handler) ListNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 // UpdateNode 处理 PUT /api/v1/nodes/{id}
+//
+// ★ 这里原先把 body 直接入库、零校验，有两个后果：
+//  1. CreateNode 的 SSRF 拦截（内网地址）可以被绕过 ——
+//     先 POST 一个合规地址，再 PUT 成 http://169.254.169.254 即可打到云元数据服务；
+//  2. PUT 是全量覆盖语义，body 里不带 address 就会把地址写成空串，
+//     路由仍然认为这条节点可用，转发时报 502 且很难排查。
+//
+// 修法：和 Create 共用 validateNodeForWrite。
 func (h *Handler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -92,6 +84,11 @@ func (h *Handler) UpdateNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	node.ID = id
+
+	if err := validateNodeForWrite(&node); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	if err = h.nodes.Update(r.Context(), &node); err != nil {
 		log.Println("update node failed", err)
