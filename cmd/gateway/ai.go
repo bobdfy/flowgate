@@ -2,14 +2,22 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
+	"sort"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/bobdfy/flowgate/internal/ai"
+	"github.com/bobdfy/flowgate/internal/model"
 	"github.com/bobdfy/flowgate/internal/provider"
+	"github.com/bobdfy/flowgate/internal/quota"
+	"github.com/bobdfy/flowgate/internal/store/postgres"
 	"go.yaml.in/yaml/v2"
 )
 
@@ -19,7 +27,9 @@ type aiProviderConfig struct {
 	Endpoint     string   // 根地址，不带路径
 	UpstreamPath string   // 上游真实路径；空 = 用对外的 /v1/...
 	APIKeys      []string // key 池（阶段一只用第一个非空的）
+	RawAPIKeys   []string // 配置文件原文（含 ${ENV}），用于首次导入 DB
 	Enabled      bool
+	StreamUsage  bool // 上游支持 stream_options.include_usage
 }
 
 // aiModelConfig 是"对外模型名 → 某厂商的某模型"的映射。
@@ -45,6 +55,7 @@ type yamlConfig struct {
 		UpstreamPath string   `yaml:"upstream_path"`
 		APIKeys      []string `yaml:"api_keys"`
 		Enabled      bool     `yaml:"enabled"`
+		StreamUsage  bool     `yaml:"stream_usage"`
 	} `yaml:"providers"`
 
 	Models []struct {
@@ -95,7 +106,9 @@ func loadAIConfig(path string) (*aiConfig, error) {
 			Endpoint:     p.Endpoint,
 			UpstreamPath: p.UpstreamPath,
 			APIKeys:      keys,
+			RawAPIKeys:   p.APIKeys,
 			Enabled:      enabled,
+			StreamUsage:  p.StreamUsage,
 		}
 
 		if p.Enabled && !enabled {
@@ -130,13 +143,204 @@ func expandEnv(in []string) []string {
 	return out
 }
 
-// buildAIRouter 装配 AI 支路，返回一个按路径分流的 handler。
-func buildAIRouter(cfg aiConfig, fallback http.Handler) http.Handler {
-	return aiRouter(buildAIHandler(cfg), fallback)
+// aiRuntime 持有当前 AI handler，并在 DB 配置版本变化时热切换。
+//
+// 配置来源优先级：DB > ai.yaml。
+// 启动时若 DB 为空，用 ai.yaml 做一次性种子；DB 查询失败则保留旧 handler。
+type aiRuntime struct {
+	store   *postgres.AIConfigStore
+	tpm     quota.Limiter
+	handler atomic.Pointer[ai.Handler]
+	version atomic.Int64
+}
+
+// newAIRuntime 构建运行时：先用 ai.yaml 兜底，再尝试导入种子并切到 DB 配置。
+func newAIRuntime(ctx context.Context, cfg aiConfig, tpm quota.Limiter, store *postgres.AIConfigStore) *aiRuntime {
+	rt := &aiRuntime{store: store, tpm: tpm}
+	rt.handler.Store(buildAIHandler(cfg, tpm))
+
+	if store == nil || !cfg.Enabled {
+		return rt
+	}
+
+	if n, err := store.CountProviders(ctx); err != nil {
+		slog.Warn("ai_config_db_unavailable", "err", err)
+	} else if n == 0 {
+		providers, models := aiSeedFromYAML(cfg)
+		if len(providers) > 0 {
+			seeded, err := store.Seed(ctx, providers, models)
+			if err != nil {
+				slog.Warn("ai_config_seed_failed", "err", err)
+			} else if seeded {
+				slog.Info("ai_config_seeded", "providers", len(providers), "models", len(models))
+			}
+		}
+	}
+
+	rt.reload(ctx)
+	return rt
+}
+
+// reload 从 DB 拉一份快照并重建 handler。失败时保留当前 handler（fail-static）。
+func (rt *aiRuntime) reload(ctx context.Context) {
+	providers, models, version, err := rt.store.Snapshot(ctx)
+	if err != nil {
+		slog.Warn("ai_config_reload_failed", "err", err)
+		return
+	}
+	cfg := aiConfigFromDB(providers, models)
+	rt.handler.Store(buildAIHandler(cfg, rt.tpm))
+	rt.version.Store(version)
+	slog.Info("ai_config_reloaded",
+		"version", version,
+		"provider_count", len(providers),
+		"model_count", len(models))
+}
+
+// Start 每 3 秒查一次版本号，变了才重建 handler。
+func (rt *aiRuntime) Start(ctx context.Context) {
+	if rt.store == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				v, err := rt.store.Version(ctx)
+				if err != nil {
+					slog.Warn("ai_config_version_failed", "err", err)
+					continue
+				}
+				if v == rt.version.Load() {
+					continue
+				}
+				rt.reload(ctx)
+			}
+		}
+	}()
+}
+
+// Handler 返回当前生效的 AI handler（可能为 nil）。
+func (rt *aiRuntime) Handler() *ai.Handler {
+	return rt.handler.Load()
+}
+
+// aiConfigFromDB 把 DB 快照转成 buildAIHandler 认识的配置。
+func aiConfigFromDB(providers []model.AIProvider, models []model.AIModel) aiConfig {
+	cfg := aiConfig{
+		Enabled:   true,
+		Providers: make(map[string]aiProviderConfig, len(providers)),
+	}
+	for _, p := range providers {
+		keys := make([]string, 0, 2)
+		if p.APIKeyEnv != "" {
+			if v := strings.TrimSpace(os.Getenv(p.APIKeyEnv)); v != "" {
+				keys = append(keys, v)
+			}
+		}
+		if p.APIKey != "" {
+			keys = append(keys, p.APIKey)
+		}
+		cfg.Providers[strings.ToLower(p.Name)] = aiProviderConfig{
+			Name:         p.Name,
+			Endpoint:     p.Endpoint,
+			UpstreamPath: p.UpstreamPath,
+			APIKeys:      keys,
+			Enabled:      p.Enabled && len(keys) > 0,
+			StreamUsage:  p.StreamUsage,
+		}
+	}
+	for _, m := range models {
+		upstream := m.UpstreamModel
+		if upstream == "" {
+			upstream = m.Name
+		}
+		cfg.Models = append(cfg.Models, aiModelConfig{
+			Name:          m.Name,
+			Provider:      strings.ToLower(m.ProviderName),
+			UpstreamModel: upstream,
+		})
+	}
+	return cfg
+}
+
+var aiEnvNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// aiSeedFromYAML 把 ai.yaml 转成首次入库的 provider / model 记录。
+//
+// 只存环境变量名（${VAR} → api_key_env），字面量 key（本地假上游）才存 api_key。
+func aiSeedFromYAML(cfg aiConfig) ([]model.AIProvider, []model.AIModel) {
+	keys := make([]string, 0, len(cfg.Providers))
+	for k := range cfg.Providers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	realName := make(map[string]string, len(keys)) // lower → 原始 name
+	providers := make([]model.AIProvider, 0, len(keys))
+	for _, k := range keys {
+		p := cfg.Providers[k]
+		sp := model.AIProvider{
+			Name:         p.Name,
+			Type:         "openai",
+			Endpoint:     p.Endpoint,
+			UpstreamPath: p.UpstreamPath,
+			StreamUsage:  p.StreamUsage,
+			Enabled:      p.Enabled,
+		}
+		for _, raw := range p.RawAPIKeys {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			if envName, ok := envPlaceholder(raw); ok {
+				sp.APIKeyEnv = envName
+			} else {
+				sp.APIKey = raw
+			}
+			break
+		}
+		providers = append(providers, sp)
+		realName[k] = p.Name
+	}
+
+	models := make([]model.AIModel, 0, len(cfg.Models))
+	for _, m := range cfg.Models {
+		provider, ok := realName[strings.ToLower(m.Provider)]
+		if !ok {
+			slog.Warn("ai_seed_model_skipped",
+				"model", m.Name, "provider", m.Provider, "reason", "provider 不存在")
+			continue
+		}
+		models = append(models, model.AIModel{
+			Name:          m.Name,
+			ProviderName:  provider,
+			UpstreamModel: m.UpstreamModel,
+			Enabled:       true,
+		})
+	}
+	return providers, models
+}
+
+// envPlaceholder 识别 "${ZHIPU_API_KEY}" 这种写法，返回变量名。
+func envPlaceholder(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "${") || !strings.HasSuffix(s, "}") {
+		return "", false
+	}
+	name := s[2 : len(s)-1]
+	if !aiEnvNameRe.MatchString(name) {
+		return "", false
+	}
+	return name, true
 }
 
 // buildAIHandler 按配置构造 AI 处理器；没有可用 model 时返回 nil。
-func buildAIHandler(cfg aiConfig) *ai.Handler {
+func buildAIHandler(cfg aiConfig, tpm quota.Limiter) *ai.Handler {
 	if !cfg.Enabled {
 		slog.Info("ai_gateway_off", "hint", "去掉 -ai=false 可启用")
 		return nil
@@ -172,6 +376,7 @@ func buildAIHandler(cfg aiConfig) *ai.Handler {
 			BaseURL:       p.Endpoint,
 			UpstreamPath:  p.UpstreamPath,
 			UpstreamModel: m.UpstreamModel,
+			StreamUsage:   p.StreamUsage,
 		}
 
 		// 每个 entry 都要单独探 —— 以后挂不同适配器时能力可能不同。
@@ -194,17 +399,21 @@ func buildAIHandler(cfg aiConfig) *ai.Handler {
 	}
 
 	slog.Info("ai_gateway_enabled", "model_count", len(entries))
-	return ai.NewHandler(entries)
+	h := ai.NewHandler(entries)
+	h.SetTPM(tpm)
+	return h
 }
 
-// aiRouter 按路径分流：命中的 AI 路径走 aiHandler，其余交给 fallback。
+// aiRouter 按路径分流：命中的 AI 路径走当前 handler，其余交给 fallback。
+//
+// handler 用 getter 传入，这样配置热更新时无需重建中间件链。
 //
 //	RequestID → Logging → RequireAuth → RateLimit(租户) → RateLimit(key)
 //	  →  分流 → AI / 普通代理
-func aiRouter(h *ai.Handler, fallback http.Handler) http.Handler {
+func aiRouter(get func() *ai.Handler, fallback http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h != nil {
-			if _, ok := ai.ApiNameFromPath(r.Method, r.URL.Path); ok {
+		if _, ok := ai.ApiNameFromPath(r.Method, r.URL.Path); ok {
+			if h := get(); h != nil {
 				h.ServeHTTP(w, r)
 				return
 			}

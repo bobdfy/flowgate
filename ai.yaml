@@ -7,6 +7,7 @@ providers:
     api_keys:
       - ${ZHIPU_API_KEY}
     enabled: true
+    stream_usage: true
 
   # ---- DeepSeek（路径就是标准的 /v1/...，所以 upstream_path 留空）----
   - name: deepseek
@@ -15,6 +16,7 @@ providers:
     api_keys:
       - ${DEEPSEEK_API_KEY}
     enabled: true
+    stream_usage: true
 
   # ---- 本地假上游（用来测恶劣切分）----
   - name: mockai
@@ -22,6 +24,7 @@ providers:
     endpoint: http://localhost:8095
     api_keys: ["sk-mock"]     # 它不校验，随便填
     enabled: true
+    stream_usage: true
 
 models:
   - name: flowgate-chat

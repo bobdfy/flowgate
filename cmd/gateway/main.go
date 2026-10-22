@@ -20,6 +20,7 @@ import (
 	"github.com/bobdfy/flowgate/internal/gateway"
 	"github.com/bobdfy/flowgate/internal/loadbalance"
 	"github.com/bobdfy/flowgate/internal/middleware"
+	"github.com/bobdfy/flowgate/internal/quota"
 	"github.com/bobdfy/flowgate/internal/ratelimit"
 	"github.com/bobdfy/flowgate/internal/store/postgres"
 	"github.com/joho/godotenv"
@@ -74,6 +75,7 @@ func main() {
 	burst := flag.Float64("burst", 200, "令牌桶容量，允许的最大突发请求数")
 	failMode := flag.String("fail-mode", "fallback", "Redis 故障时的策略:closed / fallback / open")
 	authCacheTTL := flag.Duration("auth-cache-ttl", 0, "鉴权结果进程内缓存 TTL（>0 启用；0 关闭）")
+	tpmWindow := flag.Duration("tpm-window", time.Minute, "TPM 配额窗口长度（如 1m / 5m / 1h）")
 	pprof := flag.Bool("pprof", false, "启用 pprof 调试端点(默认关闭, 仅 127.0.0.1)")
 	flag.Parse()
 
@@ -81,14 +83,21 @@ func main() {
 		slog.Error("invalid rate limit config", "burst", *burst)
 		os.Exit(1)
 	}
+	if *tpmWindow < time.Second {
+		slog.Error("invalid tpm window", "tpm_window", tpmWindow.String())
+		os.Exit(1)
+	}
 
 	local := ratelimit.NewLocalLimiter(*burst)
 
 	redisL := ratelimit.NewRedisLimiter(rdb, 10*time.Second)
+	tpm := quota.NewRedisTPMWithWindow(rdb, *tpmWindow)
+	slog.Info("tpm_window", "window", tpmWindow.String())
 
 	Limiter := ratelimit.NewFallbackLimiter(redisL, local, ratelimit.FailMode(*failMode))
 
 	apiKeyStore := postgres.NewAPIKeyStore(db)
+	aiConfigStore := postgres.NewAIConfigStore(db)
 
 	var authenticator *middleware.Authenticator
 	if *authCacheTTL > 0 {
@@ -213,10 +222,16 @@ func main() {
 		aiCfg = nil
 	}
 	if aiCfg == nil {
-		slog.Info("ai_gateway_off", "reason", "没有可用的 AI 配置")
-		aiCfg = &aiConfig{} // 空配置 → buildAIHandler 返回 nil
+		// ai.yaml 不存在也不代表 AI 关闭：DB 里的配置仍然是配置源。
+		aiCfg = &aiConfig{Enabled: true}
 	}
-	aiCfg.Enabled = aiCfg.Enabled && *aiEnabled
+	aiCfg.Enabled = *aiEnabled
+
+	// DB 是配置的事实来源；ai.yaml 只做首次种子和 DB 不可用时的回退。
+	aiCtx, aiCancel := context.WithCancel(context.Background())
+	defer aiCancel()
+	aiRT := newAIRuntime(aiCtx, *aiCfg, tpm, aiConfigStore)
+	aiRT.Start(aiCtx)
 
 	// 网关自己拒绝请求时回什么 body：AI 路径回 OpenAI 错误结构，其余回纯文本。
 	errorResponder := middleware.OpenAIErrorResponder(isAIRoute)
@@ -225,8 +240,7 @@ func main() {
 		middleware.Logging(
 			authenticator.RequireAuth(
 				middleware.RateLimitPair(
-					Limiter, pairKey, buildAIRouter(
-						*aiCfg, router),
+					Limiter, pairKey, aiRouter(aiRT.Handler, router),
 					errorResponder,
 				),
 				errorResponder,

@@ -22,10 +22,11 @@ type Handler struct {
 	versions *postgres.VersionStore
 	tenants  *postgres.TenantStore
 	apikeys  *postgres.APIKeyStore
+	aiconfig *postgres.AIConfigStore
 }
 
 // NewHandler 创建一个 Handler。
-func NewHandler(services *postgres.ServiceStore, nodes *postgres.NodeStore, routes *postgres.RouteStore, versions *postgres.VersionStore, tenants *postgres.TenantStore, apikeys *postgres.APIKeyStore) *Handler {
+func NewHandler(services *postgres.ServiceStore, nodes *postgres.NodeStore, routes *postgres.RouteStore, versions *postgres.VersionStore, tenants *postgres.TenantStore, apikeys *postgres.APIKeyStore, aiconfig *postgres.AIConfigStore) *Handler {
 	return &Handler{
 		services: services,
 		nodes:    nodes,
@@ -33,6 +34,7 @@ func NewHandler(services *postgres.ServiceStore, nodes *postgres.NodeStore, rout
 		versions: versions,
 		tenants:  tenants,
 		apikeys:  apikeys,
+		aiconfig: aiconfig,
 	}
 }
 
@@ -78,6 +80,17 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/tenants/{id}/keys", h.ListAPIKeys)
 	mux.HandleFunc("PUT /api/v1/keys/{id}", h.UpdateAPIKey)
 	mux.HandleFunc("DELETE /api/v1/keys/{id}", h.DeleteAPIKey)
+
+	// AI 上游与模型（DB 配置，gateway 轮询版本号热更新）：
+	mux.HandleFunc("GET /api/v1/ai/providers", h.ListAIProviders)
+	mux.HandleFunc("POST /api/v1/ai/providers", h.CreateAIProvider)
+	mux.HandleFunc("PUT /api/v1/ai/providers/{id}", h.UpdateAIProvider)
+	mux.HandleFunc("DELETE /api/v1/ai/providers/{id}", h.DeleteAIProvider)
+
+	mux.HandleFunc("GET /api/v1/ai/models", h.ListAIModels)
+	mux.HandleFunc("POST /api/v1/ai/models", h.CreateAIModel)
+	mux.HandleFunc("PUT /api/v1/ai/models/{name}", h.UpdateAIModel)
+	mux.HandleFunc("DELETE /api/v1/ai/models/{name}", h.DeleteAIModel)
 }
 
 // writeJSON 把 v 序列化成 JSON 写入响应。

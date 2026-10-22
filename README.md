@@ -182,7 +182,7 @@ tools/
 deploy/           docker-compose（postgres + redis + gateway + admin）
 Dockerfile        多阶段构建（gateway/admin/mock/mockai 共用一个，ARG BIN 区分）
 .dockerignore     构建上下文排除清单（密钥 / 缓存）
-ai.yaml           AI Provider 与模型配置
+ai.yaml           首次启动的 AI 配置种子（之后以 DB 为准）
 ```
 
 ---
@@ -227,9 +227,29 @@ ai.yaml           AI Provider 与模型配置
 
 ---
 
+## AI 模型管理（DB 配置 + 热更新）
+
+AI 上游与模型不再只靠 `ai.yaml`，而是可以通过管理 API 在线管理：
+
+- **API**：
+  - `GET/POST /api/v1/ai/providers`、`PUT/DELETE /api/v1/ai/providers/{id}`
+  - `GET/POST /api/v1/ai/models`、`PUT/DELETE /api/v1/ai/models/{name}`
+- **密钥只存环境变量名**：`api_key_env=ZHIPU_API_KEY`，明文密钥不落库；
+  gateway 启动时从环境变量读取。本地假上游要写死 key 时才会用到 `api_key` 列。
+- **配置来源**：首次启动若 `ai_providers` 为空，自动把 `ai.yaml` 导入 DB 做种子；
+  之后 **DB 是唯一事实来源**，`ai.yaml` 只在 DB 不可用时兜底。
+- **生效方式**：任何写操作都会在同一个事务里把 `ai_config_version` +1；
+  gateway 每 3 秒轮询该版本号，变化时重建 AI handler 并原子替换，
+  在途请求不受影响。DB 故障时保留旧 handler（fail-static）。
+- **部署**：新库会自动执行 `migrations/003_ai_config.sql`；已有库需手动执行一次
+  （如 `docker exec -i flowgate-postgres psql -U flowgate -d flowgate < migrations/003_ai_config.sql`）。
+  admin 建议用 `-admin-key` 启动，管理接口请求需带 `X-Admin-Key`。
+
+---
+
 ## 一键运行
 
-前置：Docker（方式二还需 Go 1.26+）。
+前置：Docker（方式二还需 Go 1.26+；方式三还需 `kubectl` 与本地 K8s 集群，如 Docker Desktop 自带 Kubernetes）。
 
 ### 方式一：Docker 全容器（推荐）
 
@@ -242,7 +262,7 @@ docker compose up -d --build
 
 | 服务 | 端口 | 说明 |
 |---|---|---|
-| postgres | 5433 | 首次启动自动执行 `migrations/001_init.sql`（7 张表） |
+| postgres | 5433 | 首次启动自动执行 `migrations/*.sql`（含租户、路由、TPM、AI 配置表） |
 | redis | 6380 | 密码 `flowgate` |
 | gateway | 8090 / 9090 | 数据面 / metrics |
 | admin | 8092 | 管理面 |
@@ -270,6 +290,51 @@ docker compose up -d postgres redis
 ```
 
 > 数据库 `flowgate/flowgate@localhost:5433/flowgate`；redis `localhost:6380`（密码 `flowgate`，本地 `.env` 需配 `REDIS_PASSWORD=flowgate`）。
+
+### 方式三：Kubernetes
+
+三种方式**三选一**，不要混用。
+
+```bash
+# 1. 构建镜像
+docker build --build-arg BIN=gateway -t flowgate-gateway:latest .
+docker build --build-arg BIN=admin   -t flowgate-admin:latest .
+
+# 2. 导入集群
+#    本地 kind 集群没有镜像仓库，必须手动导入，否则 Pod 会 ImagePullBackOff
+#    Git Bash 下需加 MSYS_NO_PATHCONV=1，否则容器内路径会被改写成 Windows 路径
+docker save flowgate-gateway:latest | MSYS_NO_PATHCONV=1 docker exec -i desktop-control-plane ctr -n k8s.io images import -
+docker save flowgate-admin:latest   | MSYS_NO_PATHCONV=1 docker exec -i desktop-control-plane ctr -n k8s.io images import -
+
+# 3. 建 Secret（密码不写进 YAML）
+kubectl create secret generic flowgate-secret \
+  --from-literal=REDIS_PASSWORD=flowgate \
+  --from-literal=DATABASE_URL='postgres://flowgate:flowgate@postgres:5432/flowgate'
+
+# 4. 部署
+kubectl apply -f k8s/
+kubectl get pods        # 期望 4 个 1/1 Running
+```
+
+| 文件 | 内容 |
+|---|---|
+| `k8s/10-postgres.yaml` | PVC（数据盘）+ Deployment + Service |
+| `k8s/11-redis.yaml` | Deployment + Service |
+| `k8s/20-gateway.yaml` | Deployment + Service（8090 / 9090） |
+| `k8s/21-admin.yaml` | Deployment + Service（8092） |
+
+验证：
+
+```bash
+kubectl port-forward svc/admin 18092:8092
+curl http://127.0.0.1:18092/api/v1/health          # 200
+
+kubectl port-forward svc/gateway 18090:8090
+curl http://127.0.0.1:18090/                       # 401「缺少 X-API-Key」= 鉴权生效
+```
+
+> 集群里的节点地址填 Service 名，例如 `http://mock:8091`，不要填 `127.0.0.1`
+>（那是 Pod 自己）；admin 已配 `ALLOW_PRIVATE_UPSTREAM=1` 放行集群内地址。
 
 > 完整的功能验证步骤（25 项，可直接照做）见 [验证清单.md](<验证清单.md>)。
 
@@ -369,6 +434,24 @@ bombardier -c 500 -d 30s -l http://127.0.0.1:8090/ -H "X-API-Key: <key>"
 | **未做多租户计费** | 只有配额限制，没有用量计费后台 |
 | **单实例验证** | 分布式限流支持多实例共享配额，但未做多实例集群压测 |
 
+
+### K8s 部署的不足
+
+> 属于**最小可用部署**，优先保证跑通，未做生产级加固。
+
+| # | 不足 | 影响 | 怎么补 |
+|---|---|---|---|
+| 1 | 单副本，无 HPA | 一台挂了服务就断，流量涨了扛不住 | gateway 无状态，可设 `replicas: 3` + HPA；但需先验证分布式限流配额一致 |
+| 2 | 无 Ingress | 外部访问不了，只能 `port-forward` | 加 Ingress + TLS 终止，或前置 NLB |
+| 3 | 资源限额是估算值 | 高了浪费、低了 OOMKilled | 压测后按 P99 定 requests，limits 留 1.5 倍余量 |
+| 4 | 无 PDB | 节点维护驱逐时可能全挂 | `PodDisruptionBudget: minAvailable: 1` |
+| 5 | postgres 用 Deployment 而非 StatefulSet | 无稳定网络标识，无法扩成集群 | 单实例够用；要做主从再换 StatefulSet |
+| 6 | 镜像用 `latest` + 手动导入 | 无法追溯版本，集群重建要重来 | 建私有仓库（Harbor），用 commit hash 打 tag |
+| 7 | **gateway 没有 `/health` 端点** | 只能用 `tcpSocket` 探活，**测不出路由表是否加载成功** | 加 `/health`，返回当前配置版本号 |
+| 8 | 无 NetworkPolicy | Pod 之间全通，横向移动风险大 | 只放行 gateway → postgres / redis |
+| 9 | 无监控采集 | 9090 上的 metrics 没人抓 | 部署 Prometheus + Grafana，或接入现有监控 |
+
+> 第 7 条是代码层面的真实缺口：auth 中间件里 `/health` 在白名单中，但没有对应的 handler。
 
 ### AI 部分的范围
 

@@ -8,6 +8,7 @@ type Tenant struct {
 	Name      string    `json:"name"`
 	Status    string    `json:"status"`    // active / disabled
 	QPSLimit  int64     `json:"qps_limit"` // 租户级qps
+	TPMLimit  int64     `json:"tpm_limit"` // 租户级每分钟限额
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -20,6 +21,7 @@ type APIKey struct {
 	Status         string     `json:"status"`     // active / disabled
 	QPSLimit       int64      `json:"qps_limit"`  // 这把 key 的 QPS 限额
 	TenantQPSLimit int64      `json:"-"`          // 所属租户的 QPS（GetByHash JOIN 时填，不落库、不对外）
+	TenantTPMLimit int64      `json:"-"`          //所属租户的TPM
 	ExpiresAt      *time.Time `json:"expires_at"` // nil = 永不过期
 	CreatedAt      time.Time  `json:"created_at"`
 	LastUsedAt     *time.Time `json:"last_used_at"`

@@ -39,8 +39,8 @@ func (s *APIKeyStore) Create(ctx context.Context, k *model.APIKey) error {
 func (s *APIKeyStore) GetByHash(ctx context.Context, hash string) (*model.APIKey, error) {
 	var k model.APIKey
 	err := s.pool.QueryRow(ctx,
-		`SELECT k.id, k.tenant_id, k.name, k.key_hash, k.status, k.qps_limit, k.expires_at, k.created_at,
-		        t.qps_limit
+		`SELECT k.id, k.tenant_id, k.name, k.key_hash, k.status, k.qps_limit, k.expires_at, k.created_at, 
+		t.qps_limit, t.tpm_limit
 		 FROM api_keys k
 		 JOIN tenants t ON t.id = k.tenant_id
 		 WHERE k.key_hash = $1
@@ -48,7 +48,7 @@ func (s *APIKeyStore) GetByHash(ctx context.Context, hash string) (*model.APIKey
 		   AND t.status = 'active'
 		   AND (k.expires_at IS NULL OR k.expires_at > now())`,
 		hash,
-	).Scan(&k.ID, &k.TenantID, &k.Name, &k.KeyHash, &k.Status, &k.QPSLimit, &k.ExpiresAt, &k.CreatedAt, &k.TenantQPSLimit)
+	).Scan(&k.ID, &k.TenantID, &k.Name, &k.KeyHash, &k.Status, &k.QPSLimit, &k.ExpiresAt, &k.CreatedAt, &k.TenantQPSLimit, &k.TenantTPMLimit)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil

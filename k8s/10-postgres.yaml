@@ -1,0 +1,93 @@
+# PostgreSQL —— 对应 docker-compose.yml 里的 postgres 服务
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+spec:
+  accessModes:
+    - ReadWriteOnce        # 同一时刻只能被一个节点挂载（数据库的常规要求）
+  resources:
+    requests:
+      storage: 1Gi
+  # 不写 storageClassName，Docker Desktop 会自动用内置的 local-path
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  replicas: 1              # 单机数据库，不要多副本（多副本各自一份数据，不是集群）
+  selector:
+    matchLabels:
+      app: postgres        # 必须与下面 template.metadata.labels 完全一致
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: flowgate
+            - name: POSTGRES_PASSWORD
+              value: flowgate
+            - name: POSTGRES_DB
+              value: flowgate
+          volumeMounts:
+            # 数据目录 —— 挂 PVC，容器重建数据还在
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # 建表脚本目录 —— 挂 ConfigMap，只读
+            # 注意：只在数据目录为空时执行一次；PVC 已经有数据后，改 SQL 不会重跑
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          # 就绪探针：pg_isready 通过才算可用，Service 才会把流量转进来
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "flowgate"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 5
+          # 存活探针：卡死时重启容器。
+          # 与 readiness 分开：readiness 失败只是摘流量，liveness 失败才重启
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "flowgate"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+        - name: init-sql
+          configMap:
+            name: postgres-init
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres           # 集群内域名：postgres:5432
+spec:
+  selector:
+    app: postgres          # 路由到上面 Deployment 创建的 Pod
+  ports:
+    - port: 5432
+      targetPort: 5432
+  # 不写 type，默认 ClusterIP —— 只允许集群内部访问，够用了

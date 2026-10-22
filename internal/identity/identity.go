@@ -17,6 +17,7 @@ type Identity struct {
 	// TenantQPS / KeyQPS 是两层的限流额度。
 	// 放在身份里一起传递，是因为限流中间件只认 Identity，
 	TenantQPS int64
+	TenantTPM int64
 	KeyQPS    int64
 }
 

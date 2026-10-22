@@ -8,10 +8,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bobdfy/flowgate/internal/identity"
+	"github.com/bobdfy/flowgate/internal/quota"
 )
 
 // ProviderEntry 一个上游供应商的完整信息: 连接的地址、用哪个 key、
@@ -37,6 +42,10 @@ type ProviderEntry struct {
 
 	// UpstreamPath 是上游真实路径；空 = 用 ApiName.Path()（默认行为）。
 	UpstreamPath string
+
+	// StreamUsage 表示上游支持 stream_options.include_usage。
+	// 开启后网关会替没要 usage 的客户端向上游要，结算用真实值，再把 usage 帧吞掉。
+	StreamUsage bool
 }
 
 // Handler 处理 AI 请求（OpenAI 兼容接口）。
@@ -49,6 +58,8 @@ type Handler struct {
 
 	// streams 是流式转发器，可为 nil（退化成缓冲转发）。
 	streams StreamingForwarder
+
+	tpm quota.Limiter
 }
 
 // NewHandler 创建 AI 处理器。
@@ -80,6 +91,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	for _, rt := range RegisteredRoutes() {
 		mux.Handle(rt.Method+" "+rt.Path, h)
 	}
+}
+
+// SetTPM 注入 Token 级配额限流器。nil 表示不启用 TPM。
+func (h *Handler) SetTPM(l quota.Limiter) {
+	h.tpm = l
 }
 
 // ServeHTTP 处理 /v1/* 的 OpenAI 兼容请求。
@@ -156,8 +172,46 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 8. ★ 单点判定：走 buffered 还是 streaming，只判一次。
+	// 8. 单点判定：走 buffered 还是 streaming，只判一次。
 	streaming := isStreamRequest(apiName, body)
+
+	// 8.1 上游支持时，替没要 usage 的客户端向上游要：
+	// 结算用真实 token，客户端那边再把多出来的 usage 帧吞掉。
+	stripUsage := false
+	if streaming && entry.StreamUsage && !wantsStreamUsage(body) {
+		if injected, ierr := ensureStreamUsage(body); ierr != nil {
+			slog.Warn("ai_stream_usage_inject_failed", "model", req.Model, "err", ierr)
+		} else {
+			body = injected
+			stripUsage = true
+		}
+	}
+
+	// TPM 预扣: 转发前先占额度，避免并发下集体穿透
+	var settler *tpmSettler
+	if h.tpm != nil {
+		if id, ok := identity.FromContext(r.Context()); ok {
+			res, d, qerr := h.tpm.Reserve(r.Context(), id.TenantID, estimateNeed(body), id.TenantTPM)
+			switch {
+			case qerr != nil:
+				slog.Error("tpm_reserve_failed",
+					"tenant_id", id.TenantID, "model", req.Model, "err", qerr)
+			case !d.Allowed:
+				if d.RetryAfter > 0 {
+					secs := int(math.Ceil(d.RetryAfter.Seconds()))
+					w.Header().Set("Retry-After", strconv.Itoa(secs))
+				}
+				slog.Warn("tpm_limited",
+					"tenant_id", id.TenantID, "model", req.Model,
+					"used", d.Used, "limit", d.Limit)
+				writeError(w, http.StatusTooManyRequests, ErrTypeLimit, "TPM 配额已用尽")
+				return
+			default:
+				settler = &tpmSettler{ql: h.tpm, res: res, base: r.Context()}
+				defer settler.Settle(0)
+			}
+		}
+	}
 
 	// 9. 发上游请求。
 	resp, err := h.forward(r, entry, apiName, header, body, streaming)
@@ -179,14 +233,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 10~11. 输出。
 	if streaming {
-		h.serveStream(w, r, resp, req.Model)
+		h.serveStream(w, r, resp, req.Model, body, settler, stripUsage)
 		return
 	}
-	h.serveBuffered(w, resp, req.Model)
+	tokens := h.serveBuffered(w, resp, req.Model)
+	if settler != nil {
+		settler.Settle(tokens)
+	}
+
 }
 
 // serveModels 处理 GET /v1/models。
-// TODO(阶段三)：改用 ModelRegistry —— 只暴露"已配置且启用"的模型，
 // 不把上游的全部模型名泄露给客户端。
 func (h *Handler) serveModels(w http.ResponseWriter) {
 	list := ModelList{Object: "list", Data: make([]ModelInfo, 0, len(h.providers))}
@@ -208,66 +265,74 @@ func (h *Handler) serveModels(w http.ResponseWriter) {
 }
 
 // serveBuffered 处理非流式响应：整读上游 body → 透传给客户端。
-//
-// 上游报错时原样透传它的状态码和错误体 —— 不要伪装成成功，
-// 也不要自己改成 502。401 = 上游 key 配错了，429 = 被上游限流，
+// 401 = 上游 key 配错了，429 = 被上游限流，
 // 这两种和"网关自己 502"是完全不同的问题，混掉之后排障要多花几小时。
-func (h *Handler) serveBuffered(w http.ResponseWriter, resp *http.Response, model string) {
+func (h *Handler) serveBuffered(w http.ResponseWriter, resp *http.Response, model string) int64 {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		slog.Error("ai_read_upstream_failed", "model", model, "err", err)
 		writeError(w, http.StatusBadGateway, ErrTypeUpstream,
 			"读取上游响应失败: "+err.Error())
-		return
+		return 0
 	}
 	if resp.StatusCode >= 400 {
+		copySafeHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(respBody)
+		return 0
+	}
+
+	copySafeHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(respBody)
+
+	// 解析 usage 用于 TPM 结算；解析失败不影响响应（已经写出去了）。
+	var cr ChatResponse
+	if err := json.Unmarshal(respBody, &cr); err != nil {
+		return 0
+	}
+	return int64(cr.Usage.TotalTokens)
+}
+
+// serveStream 处理流式响应：交给注入的 SSE 转发器。
+func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, body []byte, settler *tpmSettler, stripUsage bool) {
+	if h.streams == nil {
+		slog.Warn("ai_stream_forwarder_missing", "model", model)
+		tokens := h.serveBuffered(w, resp, model)
+		if settler != nil {
+			settler.Settle(tokens)
+		}
+		return
+	}
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
 		copySafeHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(respBody)
 		return
 	}
 
-	copySafeHeaders(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(respBody)
-}
-
-// serveStream 处理流式响应：交给注入的 SSE 转发器。
-//
-// 三个必须处理的边界：
-//
-//  1. h.streams == nil —— 没注入转发器时退化成 serveBuffered，不要 panic
-//  2. resp.StatusCode >= 400 —— 上游报错时返回的是 JSON 不是 SSE。
-//     硬按 SSE 分帧会把整个 JSON 当成"没有分隔符的残留"，
-//     最后 flush 出一个畸形事件，客户端解析器直接挂掉，真实错误信息全丢
-//  3. 顺序：先 prepareStreamHeaders（含删 Content-Length）→ WriteHeader →
-//     再开始转发。顺序反了头就不生效
-func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http.Response, model string) {
-	if h.streams == nil {
-		slog.Warn("ai_stream_forwarder_missing", "model", model)
-		h.serveBuffered(w, resp, model)
-		return
-	}
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		copySafeHeaders(w.Header(), resp.Header)
-		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(body)
-		return
-	}
-
 	prepareStreamHeaders(w, resp)
 	w.WriteHeader(http.StatusOK)
 
-	// sink 目前恒为 nil。
-	//
-	// 它原本是给用量统计用的钩子（逐事件抽 usage 交给 Meter）。
-	// 现在不做计费，所以留 nil；以后要做的话在这里赋值即可。
-	var sink StreamEventSink
+	usage := newStreamUsage(body, stripUsage)
 
-	if err := h.streams(w, r, resp.Body, sink, model); err != nil {
+	if err := h.streams(w, r, resp.Body, usage.sink(), model); err != nil {
 		// 响应头可能已经发出去了，只能记日志。
 		slog.Warn("ai_stream_failed", "model", model, "err", err)
+	}
+	if settler != nil {
+		settler.Settle(usage.actual())
+	}
+	if usage.seen {
+		slog.Info("tpm_stream_usage",
+			"model", model,
+			"actual", usage.total,
+			"estimated", usage.estimated(),
+			"prompt_est", usage.promptTokens,
+			"completion_est", usage.completionBytes/4,
+			"ratio", float64(usage.estimated())/float64(usage.total))
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -68,6 +69,12 @@ func handleStream(w http.ResponseWriter, r *http.Request, modes *modeStore, logg
 		{text: "data: [DONE]", isLast: true},
 	}
 
+	// 和真实 OpenAI 一致：客户端没要 include_usage 就不发 usage 事件，
+	// 这样网关的兜底估算路径才能在 E2E 里被真正测到。
+	if !wantsUsage(reqBody) {
+		events = append(events[:len(events)-2], events[len(events)-1])
+	}
+
 	mode := modes.get()
 
 	// sse_oversize：先发一段超大垃圾（没有分隔符），再发正常事件。
@@ -127,6 +134,16 @@ func handleStream(w http.ResponseWriter, r *http.Request, modes *modeStore, logg
 	}
 
 	logger.Printf("流式发送完成 mode=%s events=%d", mode, len(events))
+}
+
+// wantsUsage 判断客户端是否要求流式响应带 usage 事件。
+func wantsUsage(body []byte) bool {
+	var p struct {
+		StreamOptions struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
+	}
+	return json.Unmarshal(body, &p) == nil && p.StreamOptions.IncludeUsage
 }
 
 // writeRaw 写一段字节并 Flush。

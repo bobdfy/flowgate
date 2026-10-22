@@ -76,6 +76,9 @@ func validateTenantForWrite(t *model.Tenant) error {
 	if t.QPSLimit <= 0 {
 		t.QPSLimit = 100
 	}
+	if t.TPMLimit <= 0 {
+		t.TPMLimit = 100000
+	}
 	return nil
 }
 

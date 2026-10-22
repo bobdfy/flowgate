@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/bobdfy/flowgate/internal/identity"
@@ -35,8 +36,25 @@ func NewAuthenticatorWithCache(keys *postgres.APIKeyStore, ttl time.Duration) *A
 	}
 }
 
+// apiKeyFromRequest 取客户端 key：优先 X-API-Key，其次 Authorization: Bearer。
+//
+// 后者是为了兼容 OpenAI SDK / agent 这类只会发 Bearer 的客户端；
+// Authorization 本身不在转发白名单里，因此不会泄露给上游。
+func apiKeyFromRequest(r *http.Request) string {
+	if key := strings.TrimSpace(r.Header.Get("X-API-Key")); key != "" {
+		return key
+	}
+	const prefix = "Bearer "
+	auth := r.Header.Get("Authorization")
+	if len(auth) > len(prefix) && strings.EqualFold(auth[:len(prefix)], prefix) {
+		return strings.TrimSpace(auth[len(prefix):])
+	}
+	return ""
+}
+
 // RequireAuth 返回鉴权中间件。
-// 流程：白名单跳过 → 取 X-API-Key（空则 401）→ hash 查库 → nil 则 401 → 注入 context 放行。
+// 流程：白名单跳过 → 取 X-API-Key / Authorization Bearer（空则 401）
+// → hash 查库 → nil 则 401 → 注入 context 放行。
 func (a *Authenticator) RequireAuth(next http.Handler, responder ErrorResponder) http.Handler {
 	fail := func(w http.ResponseWriter, r *http.Request, status int, msg string) {
 		if responder != nil {
@@ -52,10 +70,10 @@ func (a *Authenticator) RequireAuth(next http.Handler, responder ErrorResponder)
 			return
 		}
 
-		key := r.Header.Get("X-API-Key")
+		key := apiKeyFromRequest(r)
 		if key == "" {
 			slog.Warn("auth_missing_key", "path", r.URL.Path)
-			fail(w, r, http.StatusUnauthorized, "缺少 X-API-Key 请求头")
+			fail(w, r, http.StatusUnauthorized, "缺少 X-API-Key 或 Authorization: Bearer 请求头")
 			return
 		}
 
@@ -73,6 +91,7 @@ func (a *Authenticator) RequireAuth(next http.Handler, responder ErrorResponder)
 				TenantID:  k.TenantID,
 				KeyID:     k.ID,
 				TenantQPS: k.TenantQPSLimit,
+				TenantTPM: k.TenantTPMLimit,
 				KeyQPS:    k.QPSLimit,
 			})
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -101,6 +120,7 @@ func (a *Authenticator) RequireAuth(next http.Handler, responder ErrorResponder)
 			TenantID:  k.TenantID,
 			KeyID:     k.ID,
 			TenantQPS: k.TenantQPSLimit,
+			TenantTPM: k.TenantTPMLimit,
 			KeyQPS:    k.QPSLimit,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
