@@ -46,4 +46,5 @@ const (
 	ErrTypeGateway        = "gateway_error"         // 500：网关自身出错
 	ErrTypeTimeout        = "timeout_error"         // 504：上游超时
 	ErrTypeLimit          = "rate_limit_error"      //TPM配额用尽
+	ErrTypePermission     = "permission_error"      // 403：key 无权使用该模型
 )

@@ -19,6 +19,8 @@ type Identity struct {
 	TenantQPS int64
 	TenantTPM int64
 	KeyQPS    int64
+	// AllowedModels 是这把 key 的模型白名单；空 = 不限制。
+	AllowedModels []string
 }
 
 // WithIdentity 把身份注入 context，返回新的 context。

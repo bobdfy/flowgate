@@ -61,3 +61,10 @@ b-*.json
 优化方案.md
 
 压测报告.md
+
+# ===== 前端 =====
+web/node_modules/
+web/dist/
+web/.env.local
+!web/.env.example
+!web/.env.mock

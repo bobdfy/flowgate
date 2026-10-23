@@ -88,11 +88,12 @@ func (a *Authenticator) RequireAuth(next http.Handler, responder ErrorResponder)
 				return
 			}
 			ctx := identity.WithIdentity(r.Context(), &identity.Identity{
-				TenantID:  k.TenantID,
-				KeyID:     k.ID,
-				TenantQPS: k.TenantQPSLimit,
-				TenantTPM: k.TenantTPMLimit,
-				KeyQPS:    k.QPSLimit,
+				TenantID:      k.TenantID,
+				KeyID:         k.ID,
+				TenantQPS:     k.TenantQPSLimit,
+				TenantTPM:     k.TenantTPMLimit,
+				KeyQPS:        k.QPSLimit,
+				AllowedModels: k.AllowedModels,
 			})
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
@@ -117,11 +118,12 @@ func (a *Authenticator) RequireAuth(next http.Handler, responder ErrorResponder)
 		// 把身份写进 context，下游（限流 / AI 网关 / 用量记录）从这里取。
 		// 用 identity.WithIdentity 而不是直接 context.WithValue
 		ctx := identity.WithIdentity(r.Context(), &identity.Identity{
-			TenantID:  k.TenantID,
-			KeyID:     k.ID,
-			TenantQPS: k.TenantQPSLimit,
-			TenantTPM: k.TenantTPMLimit,
-			KeyQPS:    k.QPSLimit,
+			TenantID:      k.TenantID,
+			KeyID:         k.ID,
+			TenantQPS:     k.TenantQPSLimit,
+			TenantTPM:     k.TenantTPMLimit,
+			KeyQPS:        k.QPSLimit,
+			AllowedModels: k.AllowedModels,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

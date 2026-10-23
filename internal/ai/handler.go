@@ -109,7 +109,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if apiName == Models {
-		h.serveModels(w)
+		h.serveModels(w, r)
 		return
 	}
 
@@ -142,6 +142,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	entry, ok := h.providers[req.Model]
 	if !ok || entry == nil {
 		writeError(w, http.StatusNotFound, ErrTypeNotFound, "未知模型: "+req.Model)
+		return
+	}
+
+	// 5.1 Key 级模型白名单：配置了 allowed_models 的 key 只能用列出的模型。
+	if !modelAllowed(r.Context(), req.Model) {
+		slog.Warn("ai_model_forbidden", "model", req.Model, "path", r.URL.Path)
+		writeError(w, http.StatusForbidden, ErrTypePermission,
+			"该 API Key 无权使用模型: "+req.Model)
 		return
 	}
 
@@ -243,13 +251,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// modelAllowed 判断当前请求的 API Key 是否有权使用该模型。
+// 没有身份（理论上不会发生）或白名单为空 → 不限制。
+func modelAllowed(ctx context.Context, model string) bool {
+	id, ok := identity.FromContext(ctx)
+	if !ok || len(id.AllowedModels) == 0 {
+		return true
+	}
+	for _, m := range id.AllowedModels {
+		if m == model {
+			return true
+		}
+	}
+	return false
+}
+
 // serveModels 处理 GET /v1/models。
-// 不把上游的全部模型名泄露给客户端。
-func (h *Handler) serveModels(w http.ResponseWriter) {
+// 不把上游的全部模型名泄露给客户端；配置了 allowed_models 的 key 只看到自己的模型。
+func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 	list := ModelList{Object: "list", Data: make([]ModelInfo, 0, len(h.providers))}
 	// C9：map 遍历顺序不稳定，先排序再构造，保证 /v1/models 返回稳定（也避免 golden 测试 flaky）。
 	names := make([]string, 0, len(h.providers))
 	for name := range h.providers {
+		if !modelAllowed(r.Context(), name) {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)

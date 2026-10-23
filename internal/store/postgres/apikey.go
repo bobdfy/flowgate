@@ -22,10 +22,13 @@ func NewAPIKeyStore(pool *pgxpool.Pool) *APIKeyStore {
 
 // Create 插入一把 key，并把自增 ID 写回 k.ID。
 func (s *APIKeyStore) Create(ctx context.Context, k *model.APIKey) error {
+	if k.AllowedModels == nil {
+		k.AllowedModels = []string{}
+	}
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO api_keys (tenant_id, name, key_hash, status, qps_limit, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at`,
-		k.TenantID, k.Name, k.KeyHash, k.Status, k.QPSLimit, k.ExpiresAt,
+		`INSERT INTO api_keys (tenant_id, name, key_hash, status, qps_limit, allowed_models, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at`,
+		k.TenantID, k.Name, k.KeyHash, k.Status, k.QPSLimit, k.AllowedModels, k.ExpiresAt,
 	).Scan(&k.ID, &k.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("create api key (name=%s) failed: %w", k.Name, err)
@@ -39,8 +42,9 @@ func (s *APIKeyStore) Create(ctx context.Context, k *model.APIKey) error {
 func (s *APIKeyStore) GetByHash(ctx context.Context, hash string) (*model.APIKey, error) {
 	var k model.APIKey
 	err := s.pool.QueryRow(ctx,
-		`SELECT k.id, k.tenant_id, k.name, k.key_hash, k.status, k.qps_limit, k.expires_at, k.created_at, 
-		t.qps_limit, t.tpm_limit
+		`SELECT k.id, k.tenant_id, k.name, k.key_hash, k.status, k.qps_limit,
+		        k.allowed_models, k.expires_at, k.created_at,
+		        t.qps_limit, t.tpm_limit
 		 FROM api_keys k
 		 JOIN tenants t ON t.id = k.tenant_id
 		 WHERE k.key_hash = $1
@@ -48,7 +52,8 @@ func (s *APIKeyStore) GetByHash(ctx context.Context, hash string) (*model.APIKey
 		   AND t.status = 'active'
 		   AND (k.expires_at IS NULL OR k.expires_at > now())`,
 		hash,
-	).Scan(&k.ID, &k.TenantID, &k.Name, &k.KeyHash, &k.Status, &k.QPSLimit, &k.ExpiresAt, &k.CreatedAt, &k.TenantQPSLimit, &k.TenantTPMLimit)
+	).Scan(&k.ID, &k.TenantID, &k.Name, &k.KeyHash, &k.Status, &k.QPSLimit,
+		&k.AllowedModels, &k.ExpiresAt, &k.CreatedAt, &k.TenantQPSLimit, &k.TenantTPMLimit)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -61,7 +66,7 @@ func (s *APIKeyStore) GetByHash(ctx context.Context, hash string) (*model.APIKey
 // ListByTenant 返回某租户的所有 key。
 func (s *APIKeyStore) ListByTenant(ctx context.Context, tenantID int64) ([]model.APIKey, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, tenant_id, name, key_hash, status, qps_limit, expires_at, created_at
+		`SELECT id, tenant_id, name, key_hash, status, qps_limit, allowed_models, expires_at, created_at
 		 FROM api_keys WHERE tenant_id = $1 ORDER BY id`,
 		tenantID)
 	if err != nil {
@@ -72,7 +77,8 @@ func (s *APIKeyStore) ListByTenant(ctx context.Context, tenantID int64) ([]model
 	keys := []model.APIKey{}
 	for rows.Next() {
 		var k model.APIKey
-		if err := rows.Scan(&k.ID, &k.TenantID, &k.Name, &k.KeyHash, &k.Status, &k.QPSLimit, &k.ExpiresAt, &k.CreatedAt); err != nil {
+		if err := rows.Scan(&k.ID, &k.TenantID, &k.Name, &k.KeyHash, &k.Status, &k.QPSLimit,
+			&k.AllowedModels, &k.ExpiresAt, &k.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan api key row failed: %w", err)
 		}
 		keys = append(keys, k)
@@ -80,11 +86,32 @@ func (s *APIKeyStore) ListByTenant(ctx context.Context, tenantID int64) ([]model
 	return keys, rows.Err()
 }
 
-// Update 按 ID 更新 key（name/status/expires_at）。
+// GetByID 按 ID 查 key（管理面用）；不存在返回 (nil, nil)。
+func (s *APIKeyStore) GetByID(ctx context.Context, id int64) (*model.APIKey, error) {
+	var k model.APIKey
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, tenant_id, name, key_hash, status, qps_limit, allowed_models, expires_at, created_at
+		 FROM api_keys WHERE id = $1`, id).
+		Scan(&k.ID, &k.TenantID, &k.Name, &k.KeyHash, &k.Status, &k.QPSLimit,
+			&k.AllowedModels, &k.ExpiresAt, &k.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get api key (id=%d) failed: %w", id, err)
+	}
+	return &k, nil
+}
+
+// Update 按 ID 更新 key（name/status/expires_at/模型白名单）。
 func (s *APIKeyStore) Update(ctx context.Context, k *model.APIKey) error {
+	if k.AllowedModels == nil {
+		k.AllowedModels = []string{}
+	}
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE api_keys SET name = $1, status = $2, qps_limit = $3, expires_at = $4 WHERE id = $5`,
-		k.Name, k.Status, k.QPSLimit, k.ExpiresAt, k.ID)
+		`UPDATE api_keys SET name = $1, status = $2, qps_limit = $3,
+		        allowed_models = $4, expires_at = $5 WHERE id = $6`,
+		k.Name, k.Status, k.QPSLimit, k.AllowedModels, k.ExpiresAt, k.ID)
 	if err != nil {
 		return fmt.Errorf("update api key (id=%d) failed: %w", k.ID, err)
 	}

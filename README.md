@@ -245,6 +245,20 @@ AI 上游与模型不再只靠 `ai.yaml`，而是可以通过管理 API 在线�
   （如 `docker exec -i flowgate-postgres psql -U flowgate -d flowgate < migrations/003_ai_config.sql`）。
   admin 建议用 `-admin-key` 启动，管理接口请求需带 `X-Admin-Key`。
 
+### Key 级模型白名单
+
+创建/更新 API Key 时可以带 `allowed_models`（模型别名的数组），把 Key 绑定到指定模型：
+
+```json
+{"name": "agent-a", "allowed_models": ["flowgate-deepseek"]}
+```
+
+- 空数组 / 不传 = 不限制（兼容旧 Key）；非空 = 只能用列出的模型。
+- 建 Key 时会校验别名是否存在，不存在返回 400。
+- 越权调用返回 `403 permission_error`；`GET /v1/models` 也只返回该 Key 可见的模型。
+- `PUT /api/v1/keys/{id}` 不带 `allowed_models` 时保留原值，显式传 `[]` 才清空限制。
+- 新库自动执行 `migrations/004_api_key_models.sql`；已有库需手动执行一次。
+
 ---
 
 ## 一键运行
