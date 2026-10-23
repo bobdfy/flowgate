@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"github.com/bobdfy/flowgate/internal/api"
+	"github.com/bobdfy/flowgate/internal/quota"
 	"github.com/bobdfy/flowgate/internal/store/postgres"
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -27,6 +29,8 @@ func main() {
 	dsn := flag.String("dsn", "", "数据库连接字符串（默认读 DATABASE_URL）")
 	addr := flag.String("addr", "127.0.0.1:8092", "管理服务监听地址（默认仅本机）")
 	adminKey := flag.String("admin-key", "", "管理面静态鉴权 key（空 = 不鉴权，仅限本地开发）")
+	redisAddr := flag.String("redis", os.Getenv("REDIS_ADDR"), "Redis 地址（用于 TPM 用量查询；空 = 不启用）")
+	tpmWindow := flag.Duration("tpm-window", time.Minute, "TPM 窗口长度兜底值（gateway 尚未发布窗口时使用）")
 	flag.Parse()
 
 	// 未通过 -dsn 指定时，从环境变量读取（与 gateway 一致）
@@ -54,7 +58,22 @@ func main() {
 	apiKeyStore := postgres.NewAPIKeyStore(pool)
 	aiConfigStore := postgres.NewAIConfigStore(pool)
 
-	apiHandler := api.NewHandler(serviceStore, nodeStore, routeStore, versionStore, tenantStore, apiKeyStore, aiConfigStore)
+	// TPM 用量查询直连 gateway 用的同一个 Redis；没配地址就关掉这个能力，
+	// 其余管理接口不受影响。
+	var tpm *quota.RedisTPM
+	if *redisAddr != "" {
+		rdb := redis.NewClient(&redis.Options{
+			Addr:     *redisAddr,
+			Password: os.Getenv("REDIS_PASSWORD"),
+		})
+		defer rdb.Close()
+		tpm = quota.NewRedisTPMWithWindow(rdb, *tpmWindow)
+		log.Printf("Redis 已连接（%s），TPM 用量查询已启用（兜底窗口 %s）", *redisAddr, tpmWindow.String())
+	} else {
+		log.Println("REDIS_ADDR 未设置，TPM 用量查询接口将返回 503")
+	}
+
+	apiHandler := api.NewHandler(serviceStore, nodeStore, routeStore, versionStore, tenantStore, apiKeyStore, aiConfigStore, tpm)
 
 	// 注册管理 API 路由
 	mux := http.NewServeMux()

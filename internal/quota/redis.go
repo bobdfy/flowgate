@@ -3,7 +3,6 @@ package quota
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -136,18 +135,13 @@ func (rt *RedisTPM) Settle(ctx context.Context, r Reservation, actual int64) err
 }
 
 // windowKey 固定窗口：tpm:{tenant}:{unixWindow}
-//
-// unixWindow = unix秒 / 窗口秒数，窗口一变 key 空间也跟着变，
-// 因此改窗口长度不会串用旧额度（旧 key 到期自动回收）。
 func (rt *RedisTPM) windowKey(tenantID int64, t time.Time) string {
-	secs := int64(rt.window / time.Second)
-	return "tpm:" + strconv.FormatInt(tenantID, 10) + ":" + strconv.FormatInt(t.Unix()/secs, 10)
+	return windowKeyFor(tenantID, rt.window, t)
 }
 
 // nextWindow 返回当前窗口结束时刻，用于计算 Retry-After。
 func (rt *RedisTPM) nextWindow(now time.Time) time.Time {
-	secs := int64(rt.window / time.Second)
-	return time.Unix((now.Unix()/secs+1)*secs, 0)
+	return windowStart(rt.window, now).Add(rt.window)
 }
 
 // ttlSeconds 决定配额 key 的存活时间：至少 10 分钟，

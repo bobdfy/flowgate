@@ -55,3 +55,11 @@ func (c *authCache) put(hash string, key *model.APIKey) {
 	c.items[hash] = authCacheEntry{key: key, expireAt: time.Now().Add(c.ttl)}
 	c.mu.Unlock()
 }
+
+// clear 清空全部缓存。鉴权配置版本号变化时整体失效，
+// 代价是下一轮请求重新查库（key 数量通常很小，可接受）。
+func (c *authCache) clear() {
+	c.mu.Lock()
+	c.items = make(map[string]authCacheEntry)
+	c.mu.Unlock()
+}

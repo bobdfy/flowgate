@@ -25,13 +25,25 @@ func (s *APIKeyStore) Create(ctx context.Context, k *model.APIKey) error {
 	if k.AllowedModels == nil {
 		k.AllowedModels = []string{}
 	}
-	err := s.pool.QueryRow(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin create api key: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	err = tx.QueryRow(ctx,
 		`INSERT INTO api_keys (tenant_id, name, key_hash, status, qps_limit, allowed_models, expires_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at`,
 		k.TenantID, k.Name, k.KeyHash, k.Status, k.QPSLimit, k.AllowedModels, k.ExpiresAt,
 	).Scan(&k.ID, &k.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("create api key (name=%s) failed: %w", k.Name, err)
+	}
+	if err := bumpAuthVersion(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit create api key (name=%s) failed: %w", k.Name, err)
 	}
 	return nil
 }
@@ -108,7 +120,13 @@ func (s *APIKeyStore) Update(ctx context.Context, k *model.APIKey) error {
 	if k.AllowedModels == nil {
 		k.AllowedModels = []string{}
 	}
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin update api key (id=%d): %w", k.ID, err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE api_keys SET name = $1, status = $2, qps_limit = $3,
 		        allowed_models = $4, expires_at = $5 WHERE id = $6`,
 		k.Name, k.Status, k.QPSLimit, k.AllowedModels, k.ExpiresAt, k.ID)
@@ -118,17 +136,35 @@ func (s *APIKeyStore) Update(ctx context.Context, k *model.APIKey) error {
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("update api key (id=%d) failed: record not found", k.ID)
 	}
+	if err := bumpAuthVersion(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit update api key (id=%d) failed: %w", k.ID, err)
+	}
 	return nil
 }
 
 // Delete 按 ID 删除 key。
 func (s *APIKeyStore) Delete(ctx context.Context, id int64) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM api_keys WHERE id = $1`, id)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin delete api key (id=%d): %w", id, err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, `DELETE FROM api_keys WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete api key (id=%d) failed: %w", id, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("delete api key (id=%d) failed: record not found", id)
+	}
+	if err := bumpAuthVersion(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit delete api key (id=%d) failed: %w", id, err)
 	}
 	return nil
 }

@@ -69,7 +69,13 @@ func (s *TenantStore) List(ctx context.Context) ([]model.Tenant, error) {
 
 // Update 按 ID 更新租户（name/status）。
 func (s *TenantStore) Update(ctx context.Context, t *model.Tenant) error {
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin update tenant (id=%d): %w", t.ID, err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE tenants SET name = $1, status = $2, qps_limit = $3, tpm_limit = $4 WHERE id = $5`,
 		t.Name, t.Status, t.QPSLimit, t.TPMLimit, t.ID)
 	if err != nil {
@@ -78,17 +84,37 @@ func (s *TenantStore) Update(ctx context.Context, t *model.Tenant) error {
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("update tenant (id=%d) failed: record not found", t.ID)
 	}
+	// 租户限额 / 状态被缓存进 identity，改完要让 gateway 清缓存。
+	if err := bumpAuthVersion(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit update tenant (id=%d) failed: %w", t.ID, err)
+	}
 	return nil
 }
 
 // Delete 按 ID 删除租户（级联删除其 api_keys）。
 func (s *TenantStore) Delete(ctx context.Context, id int64) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, id)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin delete tenant (id=%d): %w", id, err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("delete tenant (id=%d) failed: %w", id, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("delete tenant (id=%d) failed: record not found", id)
+	}
+	// 级联删掉的 key 可能还在 gateway 缓存里。
+	if err := bumpAuthVersion(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit delete tenant (id=%d) failed: %w", id, err)
 	}
 	return nil
 }

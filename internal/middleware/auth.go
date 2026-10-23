@@ -36,6 +36,13 @@ func NewAuthenticatorWithCache(keys *postgres.APIKeyStore, ttl time.Duration) *A
 	}
 }
 
+// InvalidateCache 清空进程内鉴权缓存。
+// gateway 轮询到 auth_version 变化时调用，让 key 白名单 / 租户限额改动立即生效；
+// 缓存未启用时是空操作。
+func (a *Authenticator) InvalidateCache() {
+	a.cache.clear()
+}
+
 // apiKeyFromRequest 取客户端 key：优先 X-API-Key，其次 Authorization: Bearer。
 //
 // 后者是为了兼容 OpenAI SDK / agent 这类只会发 Bearer 的客户端；

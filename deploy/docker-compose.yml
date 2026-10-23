@@ -68,10 +68,14 @@ services:
     environment:
       DATABASE_URL: postgres://flowgate:flowgate@postgres:5432/flowgate
       ALLOW_PRIVATE_UPSTREAM: "1"
-    ports: 
+      # 只用于查询租户当窗 TPM 用量；不配也能启动，接口返回 503。
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: flowgate
+    ports:
       - "8092:8092"
     depends_on:
       postgres: { condition:  service_healthy }
+      redis: { condition: service_healthy }
 volumes:
   postgres_data:
   redis_data:

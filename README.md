@@ -259,6 +259,18 @@ AI 上游与模型不再只靠 `ai.yaml`，而是可以通过管理 API 在线�
 - `PUT /api/v1/keys/{id}` 不带 `allowed_models` 时保留原值，显式传 `[]` 才清空限制。
 - 新库自动执行 `migrations/004_api_key_models.sql`；已有库需手动执行一次。
 
+### TPM 用量查询与鉴权缓存
+
+- `GET /api/v1/tenants/{id}/tpm-usage` 返回当前窗口的已用 token、限额、剩余量与重置时间。
+  读的是 gateway 正在用的 Redis 固定窗口计数器；窗口长度由 gateway 启动时写入 `tpm:window`，
+  所以 admin 不必再配一遍。
+- admin 未设置 `REDIS_ADDR` 时该接口返回 503，其余管理接口不受影响；
+  docker compose 已为 admin 注入 Redis 地址。
+- 管理面写 API Key / 租户时，会在同一事务里递增 `auth_version`；gateway 每 3 秒轮询，
+  发现变化后清空进程内鉴权缓存。改 `allowed_models`、限额、停用状态不再需要等缓存 TTL。
+- 新库自动执行 `migrations/005_auth_version.sql`；已有库需手动执行一次
+  （如 `docker exec -i flowgate-postgres psql -U flowgate -d flowgate < migrations/005_auth_version.sql`）。
+
 ---
 
 ## 一键运行

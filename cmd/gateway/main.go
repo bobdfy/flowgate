@@ -93,6 +93,10 @@ func main() {
 	redisL := ratelimit.NewRedisLimiter(rdb, 10*time.Second)
 	tpm := quota.NewRedisTPMWithWindow(rdb, *tpmWindow)
 	slog.Info("tpm_window", "window", tpmWindow.String())
+	// 把窗口长度告诉管理面，TPM 用量查询才能对齐同一个窗口。
+	if err := tpm.PublishWindow(context.Background()); err != nil {
+		slog.Warn("tpm_window_publish_failed", "err", err)
+	}
 
 	Limiter := ratelimit.NewFallbackLimiter(redisL, local, ratelimit.FailMode(*failMode))
 
@@ -103,6 +107,11 @@ func main() {
 	if *authCacheTTL > 0 {
 		authenticator = middleware.NewAuthenticatorWithCache(apiKeyStore, *authCacheTTL)
 		slog.Info("auth_cache_enabled", "ttl", authCacheTTL.String())
+
+		// 缓存必须能被管理面改动作废，否则改白名单要等 TTL 过期。
+		authCtx, authCancel := context.WithCancel(context.Background())
+		defer authCancel()
+		go watchAuthVersion(authCtx, db, authenticator)
 	} else {
 		authenticator = middleware.NewAuthenticator(apiKeyStore)
 	}

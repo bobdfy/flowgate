@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/bobdfy/flowgate/internal/quota"
 	"github.com/bobdfy/flowgate/internal/store/postgres"
 )
 
@@ -23,10 +24,12 @@ type Handler struct {
 	tenants  *postgres.TenantStore
 	apikeys  *postgres.APIKeyStore
 	aiconfig *postgres.AIConfigStore
+	// tpm 只用于查询租户当窗用量；nil = 未配置 Redis，用量接口返回 503。
+	tpm *quota.RedisTPM
 }
 
 // NewHandler 创建一个 Handler。
-func NewHandler(services *postgres.ServiceStore, nodes *postgres.NodeStore, routes *postgres.RouteStore, versions *postgres.VersionStore, tenants *postgres.TenantStore, apikeys *postgres.APIKeyStore, aiconfig *postgres.AIConfigStore) *Handler {
+func NewHandler(services *postgres.ServiceStore, nodes *postgres.NodeStore, routes *postgres.RouteStore, versions *postgres.VersionStore, tenants *postgres.TenantStore, apikeys *postgres.APIKeyStore, aiconfig *postgres.AIConfigStore, tpm *quota.RedisTPM) *Handler {
 	return &Handler{
 		services: services,
 		nodes:    nodes,
@@ -35,6 +38,7 @@ func NewHandler(services *postgres.ServiceStore, nodes *postgres.NodeStore, rout
 		tenants:  tenants,
 		apikeys:  apikeys,
 		aiconfig: aiconfig,
+		tpm:      tpm,
 	}
 }
 
@@ -78,6 +82,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("POST /api/v1/tenants/{id}/keys", h.CreateAPIKey)
 	mux.HandleFunc("GET /api/v1/tenants/{id}/keys", h.ListAPIKeys)
+	// 租户当窗 TPM 用量（读 gateway 正在用的 Redis 计数器）：
+	mux.HandleFunc("GET /api/v1/tenants/{id}/tpm-usage", h.GetTenantTPMUsage)
 	mux.HandleFunc("PUT /api/v1/keys/{id}", h.UpdateAPIKey)
 	mux.HandleFunc("DELETE /api/v1/keys/{id}", h.DeleteAPIKey)
 

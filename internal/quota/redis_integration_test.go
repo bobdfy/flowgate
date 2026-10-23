@@ -63,3 +63,61 @@ func TestRedisTPMIntegration(t *testing.T) {
 		t.Fatalf("退款后应放行, used=%d", d3.Used)
 	}
 }
+
+// TestRedisTPMUsageIntegration 验证用量查询与限流器读到的是同一个窗口 / 同一个计数。
+func TestRedisTPMUsageIntegration(t *testing.T) {
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		t.Skip("REDIS_ADDR 未设置，跳过 Redis 集成测试")
+	}
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     addr,
+		Password: os.Getenv("REDIS_PASSWORD"),
+	})
+	defer rdb.Close()
+
+	ctx := context.Background()
+	tenantID := time.Now().UnixNano()
+	rt := NewRedisTPMWithWindow(rdb, 5*time.Second)
+
+	// 测试会临时改写全局窗口配置，结束后恢复原值（本地开发时可能正跑着 gateway）。
+	old, oldErr := rdb.Get(ctx, windowConfigKey).Result()
+	if oldErr != nil && oldErr != redis.Nil {
+		t.Fatalf("read old window config: %v", oldErr)
+	}
+	defer func() {
+		if oldErr == redis.Nil || old == "" {
+			rdb.Del(context.Background(), windowConfigKey)
+			return
+		}
+		rdb.Set(context.Background(), windowConfigKey, old, 0)
+	}()
+
+	if err := rt.PublishWindow(ctx); err != nil {
+		t.Fatalf("publish window: %v", err)
+	}
+
+	res, d, err := rt.Reserve(ctx, tenantID, 40, 100)
+	if err != nil || !d.Allowed {
+		t.Fatalf("reserve: err=%v decision=%+v", err, d)
+	}
+	defer rdb.Del(ctx, res.Key)
+
+	if err := rt.Settle(ctx, res, 25); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+
+	u, err := rt.Usage(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("usage: %v", err)
+	}
+	if u.Used != 25 {
+		t.Fatalf("usage 应读到结算后的 25, got=%d", u.Used)
+	}
+	if u.Window != 5*time.Second {
+		t.Fatalf("usage 应用 Redis 发布的窗口 5s, got=%s", u.Window)
+	}
+	if !u.WindowStart.Before(u.WindowEnd) {
+		t.Fatalf("窗口边界不合法: %s..%s", u.WindowStart, u.WindowEnd)
+	}
+}
