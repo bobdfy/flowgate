@@ -27,7 +27,7 @@ func TestRedisTPMIntegration(t *testing.T) {
 	tenantID := time.Now().UnixNano() // 每次用独立“租户”，不污染已有数据
 	rt := NewRedisTPM(rdb)
 
-	// 1. 预扣 60，limit=100 → 放行
+	// 1. 预扣 60，limit=100 → 放行，已用 60
 	res, d, err := rt.Reserve(ctx, tenantID, 60, 100)
 	if err != nil {
 		t.Fatalf("reserve 1: %v", err)
@@ -35,32 +35,47 @@ func TestRedisTPMIntegration(t *testing.T) {
 	if !d.Allowed {
 		t.Fatalf("第一次预扣应放行, used=%d", d.Used)
 	}
+	if res.Reserved != 60 {
+		t.Fatalf("第一次应预扣 60, got=%d", res.Reserved)
+	}
 	defer rdb.Del(ctx, res.Key)
 
-	// 2. 再预扣 60 → 60+60 > 100，拒绝
-	_, d2, err := rt.Reserve(ctx, tenantID, 60, 100)
+	// 2. 再预扣 60，但只剩 40：额度没用完就放行，按剩余额度截断预扣
+	res2, d2, err := rt.Reserve(ctx, tenantID, 60, 100)
 	if err != nil {
 		t.Fatalf("reserve 2: %v", err)
 	}
-	if d2.Allowed {
-		t.Fatal("第二次预扣应被拒")
+	if !d2.Allowed {
+		t.Fatal("窗口还有额度时不应拒绝")
 	}
-	if d2.RetryAfter <= 0 {
+	if res2.Reserved != 40 || d2.Used != 100 {
+		t.Fatalf("应按剩余 40 预扣并把窗口占满, reserved=%d used=%d", res2.Reserved, d2.Used)
+	}
+
+	// 3. 已用满 → 拒绝，并给 RetryAfter
+	_, d3, err := rt.Reserve(ctx, tenantID, 1, 100)
+	if err != nil {
+		t.Fatalf("reserve 3: %v", err)
+	}
+	if d3.Allowed {
+		t.Fatal("窗口用满后应被拒")
+	}
+	if d3.RetryAfter <= 0 {
 		t.Fatal("拒绝时必须给 RetryAfter")
 	}
 
-	// 3. 实际只用了 20，退还 40
+	// 4. 第一笔实际只用了 20，退还 40 → 已用 60
 	if err := rt.Settle(ctx, res, 20); err != nil {
 		t.Fatalf("settle: %v", err)
 	}
 
-	// 4. 退款后窗口内已用 20，再预扣 60 → 80 <= 100，放行
-	_, d3, err := rt.Reserve(ctx, tenantID, 60, 100)
+	// 5. 退款后还剩 40，再预扣 40 → 100，放行
+	_, d5, err := rt.Reserve(ctx, tenantID, 40, 100)
 	if err != nil {
-		t.Fatalf("reserve 3: %v", err)
+		t.Fatalf("reserve 5: %v", err)
 	}
-	if !d3.Allowed {
-		t.Fatalf("退款后应放行, used=%d", d3.Used)
+	if !d5.Allowed {
+		t.Fatalf("退款后应放行, used=%d", d5.Used)
 	}
 }
 

@@ -64,13 +64,17 @@ services:
       args:
         BIN: admin
     container_name: flowgate-admin
-    command: ["-addr", ":8092"]
+    # admin 顺带托管控制台静态文件（web/dist），页面与 API 同源，不需要 nginx。
+    # 构建前端：cd ../web && pnpm build
+    command: ["-addr", ":8092", "-web-dir", "/app/web"]
     environment:
       DATABASE_URL: postgres://flowgate:flowgate@postgres:5432/flowgate
       ALLOW_PRIVATE_UPSTREAM: "1"
       # 只用于查询租户当窗 TPM 用量；不配也能启动，接口返回 503。
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: flowgate
+    volumes:
+      - ../web/dist:/app/web:ro
     ports:
       - "8092:8092"
     depends_on:

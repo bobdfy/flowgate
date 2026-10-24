@@ -31,10 +31,29 @@ func (rt *RedisTPM) PublishWindow(ctx context.Context) error {
 	if rt.rdb == nil {
 		return nil
 	}
-	if err := rt.rdb.Set(ctx, windowConfigKey, int64(rt.window/time.Second), 0).Err(); err != nil {
+	if err := rt.rdb.Set(ctx, windowConfigKey, int64(rt.Window()/time.Second), 0).Err(); err != nil {
 		return fmt.Errorf("publish tpm window failed: %w", err)
 	}
 	return nil
+}
+
+// PublishedWindow 读取 gateway 最近发布的窗口长度。
+// ok=false 表示 Redis 里还没有这个 key（gateway 尚未启动）。
+func (rt *RedisTPM) PublishedWindow(ctx context.Context) (time.Duration, bool, error) {
+	if rt.rdb == nil {
+		return 0, false, fmt.Errorf("tpm window: redis client is nil")
+	}
+	secs, err := rt.rdb.Get(ctx, windowConfigKey).Int64()
+	if errors.Is(err, redis.Nil) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("read published tpm window failed: %w", err)
+	}
+	if secs <= 0 {
+		return 0, false, nil
+	}
+	return time.Duration(secs) * time.Second, true, nil
 }
 
 // Usage 返回某租户当前窗口已用 token 和窗口边界。
@@ -46,7 +65,7 @@ func (rt *RedisTPM) Usage(ctx context.Context, tenantID int64) (WindowUsage, err
 		return WindowUsage{}, fmt.Errorf("tpm usage: redis client is nil")
 	}
 
-	window := rt.window
+	window := rt.Window()
 	secs, err := rt.rdb.Get(ctx, windowConfigKey).Int64()
 	switch {
 	case err == nil && secs > 0:

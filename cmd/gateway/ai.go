@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -150,14 +151,26 @@ func expandEnv(in []string) []string {
 type aiRuntime struct {
 	store   *postgres.AIConfigStore
 	tpm     quota.Limiter
+	usage   *postgres.UsageStore // 可为 nil（不记录用量）
 	handler atomic.Pointer[ai.Handler]
 	version atomic.Int64
+
+	// 最近一次加载结果，供网关状态上报（/api/v1/runtime/ai）读取。
+	statusMu sync.RWMutex
+	status   model.AIRuntimeStatus
 }
 
 // newAIRuntime 构建运行时：先用 ai.yaml 兜底，再尝试导入种子并切到 DB 配置。
-func newAIRuntime(ctx context.Context, cfg aiConfig, tpm quota.Limiter, store *postgres.AIConfigStore) *aiRuntime {
-	rt := &aiRuntime{store: store, tpm: tpm}
-	rt.handler.Store(buildAIHandler(cfg, tpm))
+func newAIRuntime(ctx context.Context, cfg aiConfig, tpm quota.Limiter, store *postgres.AIConfigStore, usage *postgres.UsageStore) *aiRuntime {
+	rt := &aiRuntime{store: store, tpm: tpm, usage: usage}
+	rt.handler.Store(buildAIHandler(cfg, tpm, usage))
+	rt.status.Enabled = cfg.Enabled
+	if cfg.Enabled && len(cfg.Models) > 0 {
+		now := time.Now().UTC()
+		rt.status.LoadedAt = &now
+		rt.status.ProviderCount = len(cfg.Providers)
+		rt.status.ModelCount = len(cfg.Models)
+	}
 
 	if store == nil || !cfg.Enabled {
 		return rt
@@ -186,15 +199,41 @@ func (rt *aiRuntime) reload(ctx context.Context) {
 	providers, models, version, err := rt.store.Snapshot(ctx)
 	if err != nil {
 		slog.Warn("ai_config_reload_failed", "err", err)
+		rt.recordError(err)
 		return
 	}
 	cfg := aiConfigFromDB(providers, models)
-	rt.handler.Store(buildAIHandler(cfg, rt.tpm))
+	rt.handler.Store(buildAIHandler(cfg, rt.tpm, rt.usage))
 	rt.version.Store(version)
+	rt.statusMu.Lock()
+	now := time.Now().UTC()
+	rt.status.Version = version
+	rt.status.LoadedAt = &now
+	rt.status.ProviderCount = len(providers)
+	rt.status.ModelCount = len(models)
+	rt.status.LastError = ""
+	rt.status.LastErrorAt = nil
+	rt.statusMu.Unlock()
 	slog.Info("ai_config_reloaded",
 		"version", version,
 		"provider_count", len(providers),
 		"model_count", len(models))
+}
+
+// recordError 记录最近一次加载失败；已生效的配置不受影响（fail-static）。
+func (rt *aiRuntime) recordError(err error) {
+	rt.statusMu.Lock()
+	defer rt.statusMu.Unlock()
+	now := time.Now().UTC()
+	rt.status.LastError = err.Error()
+	rt.status.LastErrorAt = &now
+}
+
+// Status 返回最近一次 AI 配置加载结果（值拷贝）。
+func (rt *aiRuntime) Status() model.AIRuntimeStatus {
+	rt.statusMu.RLock()
+	defer rt.statusMu.RUnlock()
+	return rt.status
 }
 
 // Start 每 3 秒查一次版本号，变了才重建 handler。
@@ -213,6 +252,7 @@ func (rt *aiRuntime) Start(ctx context.Context) {
 				v, err := rt.store.Version(ctx)
 				if err != nil {
 					slog.Warn("ai_config_version_failed", "err", err)
+					rt.recordError(err)
 					continue
 				}
 				if v == rt.version.Load() {
@@ -340,7 +380,7 @@ func envPlaceholder(s string) (string, bool) {
 }
 
 // buildAIHandler 按配置构造 AI 处理器；没有可用 model 时返回 nil。
-func buildAIHandler(cfg aiConfig, tpm quota.Limiter) *ai.Handler {
+func buildAIHandler(cfg aiConfig, tpm quota.Limiter, usage *postgres.UsageStore) *ai.Handler {
 	if !cfg.Enabled {
 		slog.Info("ai_gateway_off", "hint", "去掉 -ai=false 可启用")
 		return nil
@@ -401,6 +441,9 @@ func buildAIHandler(cfg aiConfig, tpm quota.Limiter) *ai.Handler {
 	slog.Info("ai_gateway_enabled", "model_count", len(entries))
 	h := ai.NewHandler(entries)
 	h.SetTPM(tpm)
+	if usage != nil {
+		h.SetUsageRecorder(usage)
+	}
 	return h
 }
 

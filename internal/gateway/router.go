@@ -59,6 +59,7 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 		}
 
 		nodeSpecs[node.ServiceID] = append(nodeSpecs[node.ServiceID], loadbalance.NodeSpec{
+			ID:      node.ID,
 			Address: node.Address,
 			Weight:  node.Weight,
 		})

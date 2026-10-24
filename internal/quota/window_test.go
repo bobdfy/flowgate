@@ -59,14 +59,26 @@ func TestNextWindow(t *testing.T) {
 }
 
 func TestTPMWindowDefaults(t *testing.T) {
-	if got := NewRedisTPMWithWindow(nil, 0).window; got != time.Minute {
+	if got := NewRedisTPMWithWindow(nil, 0).Window(); got != time.Minute {
 		t.Fatalf("window=0 应回落 1m, got %v", got)
 	}
-	if got := NewRedisTPMWithWindow(nil, time.Millisecond).window; got != time.Second {
+	if got := NewRedisTPMWithWindow(nil, time.Millisecond).Window(); got != time.Second {
 		t.Fatalf("sub-second 应抬到 1s, got %v", got)
 	}
-	if got := NewRedisTPM(nil).window; got != time.Minute {
+	if got := NewRedisTPM(nil).Window(); got != time.Minute {
 		t.Fatalf("NewRedisTPM 默认应为 1m, got %v", got)
+	}
+}
+
+func TestSetWindowHotSwap(t *testing.T) {
+	rt := NewRedisTPMWithWindow(nil, time.Minute)
+	rt.SetWindow(5 * time.Minute)
+	if got := rt.Window(); got != 5*time.Minute {
+		t.Fatalf("SetWindow 后应为 5m, got %v", got)
+	}
+	rt.SetWindow(0)
+	if got := rt.Window(); got != time.Minute {
+		t.Fatalf("SetWindow(0) 应回落 1m, got %v", got)
 	}
 }
 

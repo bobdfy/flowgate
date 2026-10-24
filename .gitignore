@@ -68,3 +68,8 @@ web/dist/
 web/.env.local
 !web/.env.example
 !web/.env.mock
+
+验证清单.md
+升级计划.md
+
+/docs

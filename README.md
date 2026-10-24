@@ -262,14 +262,55 @@ AI 上游与模型不再只靠 `ai.yaml`，而是可以通过管理 API 在线�
 ### TPM 用量查询与鉴权缓存
 
 - `GET /api/v1/tenants/{id}/tpm-usage` 返回当前窗口的已用 token、限额、剩余量与重置时间。
-  读的是 gateway 正在用的 Redis 固定窗口计数器；窗口长度由 gateway 启动时写入 `tpm:window`，
+  读的是 gateway 正在用的 Redis 固定窗口计数器；窗口长度由 gateway 写入 `tpm:window`，
   所以 admin 不必再配一遍。
+- **TPM 窗口可视化配置**：控制台「访问控制 → 租户与 API Key」页顶部的「TPM 配额窗口」卡片，
+  或 `PUT /api/v1/settings/tpm-window`（body `{"window_seconds": 300}`，范围 1–604800）。
+  窗口保存在 `gateway_settings` 表，gateway 每 3 秒轮询并热切换；所有实例共享同一配置。
+  `-tpm-window` 只在首次启动、数据库还没有配置时作为种子。
+  改窗口不会迁移旧计数：旧窗口的 Redis key 按 TTL 自然回收，新请求立即按新窗口计数。
+- **TPM 放行规则**：转发前按「请求体大小 / 4 + `max_tokens`（缺省 512、封顶 4096）」预扣估算 token，
+  拿到真实 usage 后多退少补。预扣最多占满剩余额度，只有窗口已用满才返回 429，
+  避免出现「还剩 9 万额度却报配额已用尽」；429 message 会带上已用 / 上限 / 重置秒数。
 - admin 未设置 `REDIS_ADDR` 时该接口返回 503，其余管理接口不受影响；
   docker compose 已为 admin 注入 Redis 地址。
 - 管理面写 API Key / 租户时，会在同一事务里递增 `auth_version`；gateway 每 3 秒轮询，
   发现变化后清空进程内鉴权缓存。改 `allowed_models`、限额、停用状态不再需要等缓存 TTL。
 - 新库自动执行 `migrations/005_auth_version.sql`；已有库需手动执行一次
   （如 `docker exec -i flowgate-postgres psql -U flowgate -d flowgate < migrations/005_auth_version.sql`）。
+- TPM 窗口配置表见 `migrations/007_gateway_settings.sql`；已有库同样需手动执行。
+
+### Token 用量流水
+
+- gateway 每完成一次 `/v1/chat/completions` 请求写一条 `ai_usage` 记录：
+  租户 / Key、对外模型名、prompt / completion / total token、是否估算、
+  状态码、是否流式、耗时、Request ID、时间。**只记量，不记费用。**
+- 写入是异步的：请求路径只做一次非阻塞入队，后台每 1 秒或每 256 条
+  批量 `CopyFrom`；队列满时丢记录并打日志，绝不阻塞 AI 响应。
+- 上游没返回 usage 时，流式按事件字节估算，并标记 `estimated=true`。
+- 控制台把每个 Key 最近 24 小时的 token / 请求数直接显示在「租户详情 → API Keys」表格里。
+- 查询接口：
+  - `GET /api/v1/usage?tenant_id=&key_id=&model=&from=&to=&limit=&offset=`
+  - `GET /api/v1/usage/summary?group_by=model|key|tenant|day&...`
+  - `from` / `to` 支持 RFC3339 或 `YYYY-MM-DD`，缺省为最近 24 小时。
+- 新库自动执行 `migrations/006_ai_usage.sql`；已有库需手动执行一次
+  （如 `docker exec -i flowgate-postgres psql -U flowgate -d flowgate < migrations/006_ai_usage.sql`）。
+
+### gateway 运行状态（节点健康 / AI 热加载）
+
+- 健康检查结果和 AI 配置加载结果只存在于 gateway 内存。gateway 每 5 秒把快照写入 Redis
+  `flowgate:gateway:status`（TTL 15 秒），admin 只读转发，不自己探测。
+- 接口：
+  - `GET /api/v1/runtime/nodes`：实时节点状态（node_id、地址、closed/half_open/open、
+    连续失败数、熔断到期时间）
+  - `GET /api/v1/runtime/ai`：最近一次 AI 配置加载结果（版本、时间、提供商/模型数、最近错误）
+  - 响应带 `instance`、`published_at`、`age_seconds`、`stale`；Redis 里没有快照时返回 503。
+- 控制台：服务详情多一列「实时健康」；「系统 → 接入状态」新增 gateway 运行状态卡片。
+- 多实例部署时以最后上报的实例为准（与 `tpm:window` 相同）。Redis 不可用或 admin 未配
+  `REDIS_ADDR` 时这些接口返回 503，其余管理接口不受影响。
+
+客户端接入（OpenAI SDK / Codex / LangChain 配置、限流与错误码、排障清单）
+见 [docs/AI接入指南.md](docs/AI接入指南.md)。
 
 ---
 
@@ -292,6 +333,10 @@ docker compose up -d --build
 | redis | 6380 | 密码 `flowgate` |
 | gateway | 8090 / 9090 | 数据面 / metrics |
 | admin | 8092 | 管理面 |
+
+管理控制台由 admin 同端口托管：先在 `web/` 执行 `pnpm install && pnpm build`，
+产物 `web/dist` 挂载进 admin，然后打开 <http://127.0.0.1:8092/>。
+开发模式仍用 `cd web && pnpm dev`（5173，`/api` 代理到 8092，支持热更新）。
 
 验证：`docker compose ps`（四个都 Up）；查表 `docker exec flowgate-postgres psql -U flowgate -d flowgate -c "\dt"`（7 张表）。
 

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,6 +33,7 @@ func main() {
 	adminKey := flag.String("admin-key", "", "管理面静态鉴权 key（空 = 不鉴权，仅限本地开发）")
 	redisAddr := flag.String("redis", os.Getenv("REDIS_ADDR"), "Redis 地址（用于 TPM 用量查询；空 = 不启用）")
 	tpmWindow := flag.Duration("tpm-window", time.Minute, "TPM 窗口长度兜底值（gateway 尚未发布窗口时使用）")
+	webDir := flag.String("web-dir", "", "管理控制台静态文件目录（如 /app/web；空 = 不托管前端）")
 	flag.Parse()
 
 	// 未通过 -dsn 指定时，从环境变量读取（与 gateway 一致）
@@ -60,9 +63,10 @@ func main() {
 
 	// TPM 用量查询直连 gateway 用的同一个 Redis；没配地址就关掉这个能力，
 	// 其余管理接口不受影响。
+	var rdb *redis.Client
 	var tpm *quota.RedisTPM
 	if *redisAddr != "" {
-		rdb := redis.NewClient(&redis.Options{
+		rdb = redis.NewClient(&redis.Options{
 			Addr:     *redisAddr,
 			Password: os.Getenv("REDIS_PASSWORD"),
 		})
@@ -79,10 +83,33 @@ func main() {
 	mux := http.NewServeMux()
 	apiHandler.RegisterRoutes(mux)
 
+	// AI 用量查询（数据由 gateway 异步写入 ai_usage）。
+	usageStore := postgres.NewUsageStore(pool)
+	api.NewUsageHandler(usageStore).RegisterRoutes(mux)
+
+	// 运行时设置（TPM 窗口等），由 gateway 轮询热加载。
+	settingsStore := postgres.NewSettingsStore(pool)
+	api.NewSettingsHandler(settingsStore, tpm).RegisterRoutes(mux)
+
+	// gateway 上报的节点健康与 AI 配置加载结果（只读）。
+	api.NewRuntimeHandler(rdb).RegisterRoutes(mux)
+
+	// 可选：同一端口托管管理控制台静态文件。
+	// 前端请求走相对路径 /api/v1，天然同源，不需要额外 nginx。
+	if *webDir != "" {
+		if _, err := os.Stat(filepath.Join(*webDir, "index.html")); err != nil {
+			// 没构建前端不应该拖垮管理面：只跳过静态托管。
+			log.Printf("web-dir 缺少 index.html，跳过前端托管（先在 web/ 执行 pnpm build）: %v", err)
+		} else {
+			mux.Handle("/", spaHandler(*webDir))
+			log.Printf("管理控制台已托管: %s", *webDir)
+		}
+	}
+
 	// 控制面有增删改 / publish / 返回明文 key 的权限，必须鉴权。
 	var handler http.Handler = mux
 	if *adminKey != "" {
-		handler = requireAdminKey(*adminKey, mux)
+		handler = requireAdminKey(*adminKey, mux, *webDir != "")
 	}
 
 	srv := &http.Server{
@@ -114,12 +141,52 @@ func main() {
 }
 
 // requireAdminKey 给管理面加静态鉴权：X-Admin-Key 必须与启动参数一致（常数时间比较）。
-func requireAdminKey(key string, next http.Handler) http.Handler {
+//
+// publicStatic=true（同时托管前端）时只保护 /api/ 开头的请求：
+// 页面本身必须能匿名加载，浏览器里再输入管理密钥。
+func requireAdminKey(key string, next http.Handler, publicStatic bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if publicStatic && !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Admin-Key")), []byte(key)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// spaHandler 托管单页应用：命中静态文件就返回文件，
+// 其余路径（/tenants、/ai/models 等前端路由）回退 index.html。
+func spaHandler(dir string) http.Handler {
+	fileServer := http.FileServer(http.Dir(dir))
+	index := filepath.Join(dir, "index.html")
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// 未注册的 /api/... 保持 404，不要被 SPA 回退成 index.html。
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.NotFound(w, r)
+			return
+		}
+		target := filepath.Join(dir, filepath.Clean("/"+r.URL.Path))
+		if info, err := os.Stat(target); err == nil && !info.IsDir() {
+			// Vite 产物文件名带内容哈希，可以长缓存；HTML 必须每次回源校验，
+			// 否则重新 pnpm build 后浏览器还在跑旧 bundle。
+			if strings.HasPrefix(r.URL.Path, "/assets/") {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			} else {
+				w.Header().Set("Cache-Control", "no-cache")
+			}
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, index)
 	})
 }

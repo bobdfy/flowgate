@@ -6,11 +6,13 @@ import (
 )
 
 type streamUsage struct {
-	promptTokens    int64 //请求体估算，转发前算一次
-	completionBytes int64 // 流式 delta 累计字节数
-	total           int64
-	seen            bool
-	stripUsage      bool // 网关替客户端要的 usage：不发给客户端
+	promptTokens     int64 // 请求体估算，转发前算一次
+	completionBytes  int64 // 流式 delta 累计字节数
+	promptActual     int64 // 上游 usage 里的 prompt_tokens
+	completionActual int64 // 上游 usage 里的 completion_tokens
+	total            int64
+	seen             bool
+	stripUsage       bool // 网关替客户端要的 usage：不发给客户端
 }
 
 func newStreamUsage(body []byte, stripUsage bool) *streamUsage {
@@ -56,9 +58,27 @@ func (u *streamUsage) observe(event []byte) bool {
 	// usage 在最后一帧，中间帧可能是 "usage":null —— 所以用指针
 	if chunk.Usage != nil && chunk.Usage.TotalTokens > 0 {
 		u.total = int64(chunk.Usage.TotalTokens)
+		u.promptActual = int64(chunk.Usage.PromptTokens)
+		u.completionActual = int64(chunk.Usage.CompletionTokens)
 		u.seen = true
 	}
 	return chunk.Usage != nil && len(chunk.Choices) == 0
+}
+
+// prompt 返回 prompt token 数：上游给了就用真实值，否则用请求体估算。
+func (u *streamUsage) prompt() int64 {
+	if u.seen {
+		return u.promptActual
+	}
+	return u.promptTokens
+}
+
+// completion 返回 completion token 数：上游给了就用真实值，否则按累计字节 / 4 估算。
+func (u *streamUsage) completion() int64 {
+	if u.seen {
+		return u.completionActual
+	}
+	return u.completionBytes / 4
 }
 
 // estimated 兜底估算：prompt 按内容字符、completion 按累计字节 / 4。

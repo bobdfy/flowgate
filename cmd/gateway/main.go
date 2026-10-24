@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -91,12 +92,20 @@ func main() {
 	local := ratelimit.NewLocalLimiter(*burst)
 
 	redisL := ratelimit.NewRedisLimiter(rdb, 10*time.Second)
-	tpm := quota.NewRedisTPMWithWindow(rdb, *tpmWindow)
-	slog.Info("tpm_window", "window", tpmWindow.String())
+
+	// TPM 窗口：数据库是事实来源，-tpm-window 只用于首启种子。
+	// 管理面改窗口后，下面的 watcher 会热切换。
+	settingsStore := postgres.NewSettingsStore(db)
+	window, windowSource := resolveTPMWindow(context.Background(), settingsStore, *tpmWindow)
+	tpm := quota.NewRedisTPMWithWindow(rdb, window)
+	slog.Info("tpm_window", "window", tpm.Window().String(), "source", windowSource)
 	// 把窗口长度告诉管理面，TPM 用量查询才能对齐同一个窗口。
 	if err := tpm.PublishWindow(context.Background()); err != nil {
 		slog.Warn("tpm_window_publish_failed", "err", err)
 	}
+	settingsCtx, settingsCancel := context.WithCancel(context.Background())
+	defer settingsCancel()
+	go watchTPMWindow(settingsCtx, settingsStore, tpm)
 
 	Limiter := ratelimit.NewFallbackLimiter(redisL, local, ratelimit.FailMode(*failMode))
 
@@ -139,6 +148,9 @@ func main() {
 	}
 
 	pools := map[int64]*loadbalance.NodePool{}
+	// 路由刷新 goroutine 会写 pools，运行状态上报 goroutine 会读；
+	// 用读写锁把 map 本身保护起来（NodePool 内部另有一把锁）。
+	var poolsMu sync.RWMutex
 
 	// loadTable 拉取当前已发布版本，构建 path → proxy 路由表。
 	loadTable := func() (int64, gateway.RouteTable, error) {
@@ -155,7 +167,9 @@ func main() {
 			return 0, nil, err
 		}
 
+		poolsMu.Lock()
 		table, err := gateway.BuildRoutes(items, cache, pools)
+		poolsMu.Unlock()
 		if err != nil {
 			return 0, nil, err
 		}
@@ -197,6 +211,8 @@ func main() {
 	//记录已启动的健康检查的池
 	started := map[int64]bool{}
 	startCheckers := func() {
+		poolsMu.RLock()
+		defer poolsMu.RUnlock()
 		for sid, pool := range pools {
 			if !started[sid] {
 				go loadbalance.NewHealthChecker(pool).Start(hcCtx)
@@ -236,11 +252,37 @@ func main() {
 	}
 	aiCfg.Enabled = *aiEnabled
 
+	// AI 用量流水：请求路径只做非阻塞入队，后台批量写库。
+	// defer 顺序（逆序执行）：先 cancel 让后台把队列刷完，再 Close 等它退出。
+	usageStore := postgres.NewUsageStore(db)
+	usageCtx, usageCancel := context.WithCancel(context.Background())
+	defer usageStore.Close()
+	defer usageCancel()
+	usageStore.Start(usageCtx)
+
 	// DB 是配置的事实来源；ai.yaml 只做首次种子和 DB 不可用时的回退。
 	aiCtx, aiCancel := context.WithCancel(context.Background())
 	defer aiCancel()
-	aiRT := newAIRuntime(aiCtx, *aiCfg, tpm, aiConfigStore)
+	aiRT := newAIRuntime(aiCtx, *aiCfg, tpm, aiConfigStore, usageStore)
 	aiRT.Start(aiCtx)
+
+	// 节点健康 + AI 加载结果只在本进程内存里，定期写 Redis 给管理面读取。
+	instance, _ := os.Hostname()
+	if instance == "" {
+		instance = "gateway"
+	}
+	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
+	defer runtimeCancel()
+	snapshotPools := func() map[int64]*loadbalance.NodePool {
+		poolsMu.RLock()
+		defer poolsMu.RUnlock()
+		out := make(map[int64]*loadbalance.NodePool, len(pools))
+		for serviceID, pool := range pools {
+			out[serviceID] = pool
+		}
+		return out
+	}
+	go publishRuntimeStatus(runtimeCtx, rdb, instance, snapshotPools, aiRT.Status)
 
 	// 网关自己拒绝请求时回什么 body：AI 路径回 OpenAI 错误结构，其余回纯文本。
 	errorResponder := middleware.OpenAIErrorResponder(isAIRoute)

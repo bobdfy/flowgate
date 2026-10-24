@@ -20,6 +20,7 @@ const (
 
 // NodeState 表示一个上游实例的运行时状态。服务器信息
 type NodeState struct {
+	ID               int64  // upstream_nodes.id，运行时状态上报用
 	Address          string // 实例地址，如 http://localhost:8091
 	Weight           int    // 权重
 	State            CircuitState
@@ -57,6 +58,7 @@ func (p *NodePool) SetCBConfig(failurethreshold int, cooldownMs int, halfOpeninf
 
 // NodeSpec 描述一个实例的静态配置(地址 + 权重), 用于建池
 type NodeSpec struct {
+	ID      int64
 	Address string
 	Weight  int
 }
@@ -69,7 +71,7 @@ func NewNodePool(specs []NodeSpec) *NodePool {
 		if w <= 0 {
 			w = 1
 		}
-		pool.nodes = append(pool.nodes, &NodeState{Address: s.Address, Weight: w, State: StateClosed})
+		pool.nodes = append(pool.nodes, &NodeState{ID: s.ID, Address: s.Address, Weight: w, State: StateClosed})
 	}
 	return pool
 }
@@ -118,6 +120,18 @@ func (p *NodePool) AllNodes() []*NodeState {
 	defer p.mu.RUnlock()
 	out := make([]*NodeState, len(p.nodes))
 	copy(out, p.nodes)
+	return out
+}
+
+// Snapshot 返回节点状态的只读值拷贝，供运行时状态上报使用。
+// 与 AllNodes 不同，这里复制的是 NodeState 本身，调用方读取时不会和后台健康检查竞争。
+func (p *NodePool) Snapshot() []NodeState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]NodeState, len(p.nodes))
+	for i, n := range p.nodes {
+		out[i] = *n
+	}
 	return out
 }
 
@@ -232,17 +246,19 @@ func (p *NodePool) SyncNodes(specs []NodeSpec) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	want := map[string]int{}
+	want := map[string]NodeSpec{}
 	for _, s := range specs {
-		want[s.Address] = s.Weight
+		want[s.Address] = s
 	}
 
 	kept := make([]*NodeState, 0, len(p.nodes))
 	for _, n := range p.nodes {
-		if w, ok := want[n.Address]; ok {
+		if s, ok := want[n.Address]; ok {
+			w := s.Weight
 			if w <= 0 {
 				w = 1
 			}
+			n.ID = s.ID
 			n.Weight = w
 			kept = append(kept, n)
 		}
@@ -259,7 +275,7 @@ func (p *NodePool) SyncNodes(specs []NodeSpec) {
 			if w <= 0 {
 				w = 1
 			}
-			kept = append(kept, &NodeState{Address: s.Address, Weight: w, State: StateClosed})
+			kept = append(kept, &NodeState{ID: s.ID, Address: s.Address, Weight: w, State: StateClosed})
 		}
 	}
 
