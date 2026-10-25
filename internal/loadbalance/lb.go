@@ -35,9 +35,26 @@ type NodePool struct {
 	mu                 sync.RWMutex
 	nodes              []*NodeState
 	cursor             int // 轮询游标：记住上次轮到第几个
-	CBFailureThreshold int // 熔断：连续失败上限
-	CBCooldownMs       int // 熔断：Open 态冷却时长（毫秒）
-	CBHalfOpenLimit    int // 熔断：HalfOpen 态最多同时放几个试探请求
+	cbFailureThreshold int // 熔断：连续失败上限
+	cbCooldownMs       int // 熔断：Open 态冷却时长（毫秒）
+	cbHalfOpenLimit    int // 熔断：HalfOpen 态最多同时放几个试探请求
+}
+
+// Lease 表示一次派发占用的节点名额
+type Lease struct {
+	pool  *NodePool
+	node  *NodeState
+	probe bool // 是否占用名额
+	once  sync.Once
+}
+
+// Node 返回本次派发到的节点。
+func (l *Lease) Node() *NodeState { return l.node }
+
+// Done 记录本次转发的最终结果并释放名额。
+// 重复调用只生效一次 —— 这样「正常路径显式调用」和「defer 兜底」可以同时存在。
+func (l *Lease) Done(ok bool) {
+	l.once.Do(func() { l.pool.recordResult(l.node, ok, l.probe) })
 }
 
 // SetCBConfig 设置熔断参数（连续失败阈值、冷却时长、半开试探上限），非正值参数用默认值兜底。
@@ -51,9 +68,11 @@ func (p *NodePool) SetCBConfig(failurethreshold int, cooldownMs int, halfOpeninf
 	if halfOpeninflight <= 0 {
 		halfOpeninflight = 1
 	}
-	p.CBFailureThreshold = failurethreshold
-	p.CBCooldownMs = cooldownMs
-	p.CBHalfOpenLimit = halfOpeninflight
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cbFailureThreshold = failurethreshold
+	p.cbCooldownMs = cooldownMs
+	p.cbHalfOpenLimit = halfOpeninflight
 }
 
 // NodeSpec 描述一个实例的静态配置(地址 + 权重), 用于建池
@@ -65,7 +84,11 @@ type NodeSpec struct {
 
 // NewNodePool 用一组地址创建实例池，默认全部健康、权重 1。
 func NewNodePool(specs []NodeSpec) *NodePool {
-	pool := &NodePool{}
+	pool := &NodePool{
+		cbFailureThreshold: 5,
+		cbCooldownMs:       10000,
+		cbHalfOpenLimit:    1,
+	}
 	for _, s := range specs {
 		w := s.Weight
 		if w <= 0 {
@@ -74,43 +97,6 @@ func NewNodePool(specs []NodeSpec) *NodePool {
 		pool.nodes = append(pool.nodes, &NodeState{ID: s.ID, Address: s.Address, Weight: w, State: StateClosed})
 	}
 	return pool
-}
-
-// AvailableNodes 返回当前可派发的健康节点列表；对冷却已到期的 Open 节点惰性转入 HalfOpen 并放行试探请求。
-func (p *NodePool) AvailableNodes() []*NodeState {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := []*NodeState{}
-	for _, n := range p.nodes {
-		switch n.State {
-		//closed 开放
-		case StateClosed:
-			out = append(out, n)
-		case StateHalfOpen:
-			if n.HalfOpenInFlight < p.CBHalfOpenLimit {
-				n.HalfOpenInFlight++ //
-				out = append(out, n)
-			}
-		case StateOpen:
-			if time.Now().After(n.OpenUntil) || time.Now().Equal(n.OpenUntil) {
-				// 冷却到期，惰性切换到 HalfOpen，等待真实流量试探
-				n.State = StateHalfOpen
-				n.HalfOpenInFlight = 0
-				n.Fails = 0
-				slog.Info("circuit_half_open",
-					"addr", n.Address,
-					"open_duration_ms", p.CBCooldownMs)
-				observability.CircuitState.WithLabelValues(n.Address).Set(2)
-				if n.HalfOpenInFlight < p.CBHalfOpenLimit {
-					n.HalfOpenInFlight++
-					out = append(out, n)
-				}
-			}
-			// 冷却未到期：跳过，不派发
-		}
-
-	}
-	return out
 }
 
 // AllNodes 返回全部节点（含不健康的，健康检查要探测所有节点才能发现恢复）。
@@ -135,19 +121,17 @@ func (p *NodePool) Snapshot() []NodeState {
 	return out
 }
 
-// NextIndex 在锁内推进轮询游标，返回本次应挑的索引（RoundRobin 用）。
-// 为什么要放 NodePool 里加锁：多个请求并发 Pick，游标必须串行推进，否则会重复/跳号。
-func (p *NodePool) NextIndex(limit int) int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	idx := p.cursor % limit
-	p.cursor++
-	return idx
+// ShouldProbe 判断健康检查这次是否要探测该节点：Open 且冷却未到期就跳过。
+// 放进池子里加锁读，避免和 pick/recordResult 并发读写 State / OpenUntil。
+func (p *NodePool) ShouldProbe(n *NodeState) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return !(n.State == StateOpen && time.Now().Before(n.OpenUntil))
 }
 
 // LoadBalancer 负载均衡器接口：从池子里挑一个健康节点。
 type LoadBalancer interface {
-	Pick() *NodeState // 返回选中的节点；没有可用节点时返回 nil
+	Pick() *Lease // 返回选中的节点；没有可用节点时返回 nil
 }
 
 // RoundRobin 轮流挑选：第 1 个请求挑节点 0，第 2 个挑节点 1，…… 循环。
@@ -161,15 +145,43 @@ func NewRoundRobin(pool *NodePool) *RoundRobin {
 }
 
 // Pick 实现 LoadBalancer：从健康节点里轮流选一个。
-func (r *RoundRobin) Pick() *NodeState {
-	available := r.pool.AvailableNodes()
-	if len(available) == 0 {
-		return nil // 全部不健康，无节点可用
+func (p *NodePool) pick() *Lease {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now()
+	avail := make([]*NodeState, 0, len(p.nodes))
+	for _, n := range p.nodes {
+		switch n.State {
+		case StateClosed:
+			avail = append(avail, n)
+		case StateOpen:
+			// 冷却到期：惰性转half_open，等真实流量
+			if now.Before(n.OpenUntil) {
+				continue
+			}
+			n.State = StateHalfOpen
+			n.Fails = 0
+			n.HalfOpenInFlight = 0
+			slog.Info("circuit_half_open",
+				"addr", n.Address,
+				"open_duration_ms", p.cbCooldownMs)
+			observability.CircuitState.WithLabelValues(n.Address).Set(2)
+			avail = append(avail, n)
+		case StateHalfOpen:
+			// 名额空着派发, 不在这里计数
+			if n.HalfOpenInFlight < p.cbHalfOpenLimit {
+				avail = append(avail, n)
+			}
+		}
+	}
+	if len(avail) == 0 {
+		return nil
 	}
 
-	//按权重展开成循环队列：权重 3 的节点复制 3 份
+	// 按权重展开循环队列：权重3的节点占3个格子
 	var expanded []*NodeState
-	for _, n := range available {
+	for _, n := range avail {
 		w := n.Weight
 		if w <= 0 {
 			w = 1
@@ -179,18 +191,37 @@ func (r *RoundRobin) Pick() *NodeState {
 		}
 	}
 
-	idx := r.pool.NextIndex(len(expanded))
-	return expanded[idx]
+	n := expanded[p.cursor%len(expanded)]
+	p.cursor++
+
+	l := &Lease{pool: p, node: n}
+	// 只给被选中的half-open 节点占名额
+	if n.State == StateHalfOpen {
+		n.HalfOpenInFlight++
+		l.probe = true
+	}
+
+	return l
+
 }
 
-// RecordResult 记录一次检查结果，在锁内更新连续计数并决定是否翻转健康状态。
+// Pick 实现 LoadBalancer：轮询 + 权重
+func (r *RoundRobin) Pick() *Lease {
+	return r.pool.pick()
+}
+
+// RecordResult 记录一次检查结果
 // ok = true 表示这次检查通过（活着）
 func (p *NodePool) RecordResult(n *NodeState, ok bool) {
+	p.recordResult(n, ok, false)
+}
+
+// recordResult 在锁内更新计数、释放试探名额并决定是否翻转状态
+func (p *NodePool) recordResult(n *NodeState, ok bool, probe bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	from := n.State
-
 	switch n.State {
 	case StateClosed:
 		if ok {
@@ -198,20 +229,19 @@ func (p *NodePool) RecordResult(n *NodeState, ok bool) {
 			return
 		}
 		n.Fails++
-		if n.Fails >= p.CBFailureThreshold {
+		if n.Fails >= p.cbFailureThreshold {
 			n.State = StateOpen
-			n.OpenUntil = time.Now().Add(time.Duration(p.CBCooldownMs) * time.Millisecond)
+			n.OpenUntil = time.Now().Add(time.Duration(p.cbCooldownMs) * time.Millisecond)
 			n.Fails = 0
 			slog.Warn("circuit_open",
 				"addr", n.Address,
 				"open_until", n.OpenUntil.Format(time.RFC3339),
-				"failure_threshold", p.CBFailureThreshold,
-				"cooldown_ms", p.CBCooldownMs)
+				"failure_threshold", p.cbFailureThreshold,
+				"cooldown_ms", p.cbCooldownMs)
 			observability.CircuitState.WithLabelValues(n.Address).Set(1)
 		}
 	case StateHalfOpen:
-		// 释放一个试探名额
-		if n.HalfOpenInFlight > 0 {
+		if probe && n.HalfOpenInFlight > 0 {
 			n.HalfOpenInFlight--
 		}
 		if ok {
@@ -227,7 +257,7 @@ func (p *NodePool) RecordResult(n *NodeState, ok bool) {
 		} else {
 			// 试探失败 → 重新打开，冷却重新计时
 			n.State = StateOpen
-			n.OpenUntil = time.Now().Add(time.Duration(p.CBCooldownMs) * time.Millisecond)
+			n.OpenUntil = time.Now().Add(time.Duration(p.cbCooldownMs) * time.Millisecond)
 			n.HalfOpenInFlight = 0
 			observability.CircuitState.WithLabelValues(n.Address).Set(1)
 			slog.Warn("circuit_open",
@@ -236,7 +266,6 @@ func (p *NodePool) RecordResult(n *NodeState, ok bool) {
 				"reason", "probe_failed",
 				"open_until", n.OpenUntil.Format(time.RFC3339))
 		}
-
 	case StateOpen:
 	}
 }

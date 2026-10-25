@@ -105,7 +105,7 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 			pool.SetCBConfig(svc.CBFailureThreshold, svc.CBCooldownMs, svc.CBHalfOpenLimit)
 
 			lb := loadbalance.NewRoundRobin(pool)
-			backend = &Backend{svc: svc, lb: lb, pool: pool, proxyCache: cache,
+			backend = &Backend{svc: svc, lb: lb, proxyCache: cache,
 				guard: overload.NewGuard(svc.MaxConcurrency,
 					overload.Strategy(svc.OverloadStrategy),
 					time.Duration(svc.QueueTimeoutMs)*time.Millisecond,

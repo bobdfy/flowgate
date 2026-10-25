@@ -31,8 +31,6 @@ type Backend struct {
 	// 挑中实例后，去哪拿转发用的 proxy (转发器缓存)
 	proxyCache *ProxyCache
 
-	pool *loadbalance.NodePool
-
 	guard *overload.Guard
 }
 
@@ -53,18 +51,20 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var (
-		resp *http.Response
-		err  error
-		node *loadbalance.NodeState
+		resp  *http.Response
+		err   error
+		node  *loadbalance.NodeState
+		lease *loadbalance.Lease
 	)
 
+	defer func() {
+		if lease != nil {
+			lease.Done(false)
+		}
+	}()
+
 	// 服务级并发护栏（过载保护），位置在超时(之后)。
-	//
-	// 为什么不能放在超时之前：那样"排队等待"的时间不计入 request_timeout。
-	// 举例：request_timeout = 10s、排队等了 20s —— 位置在超时之前的话，
-	// 出队后才开始算那 10s，客户端实际等了 30s，跟承诺的 10s 对不上。
 	// 放在之后，排队 + 重试 + 转发 全程共享同一个 deadline，
-	// 这也正是 wait 策略能成立的前提。
 	release, err := b.guard.Acquire(req.Context())
 	if err != nil {
 		if rejectOverload(w, err, "service", b.svc.Name, func(reason string) {
@@ -94,10 +94,11 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	attempt := 0
 	for ; ; attempt++ {
-		node = b.lb.Pick()
-		if node == nil {
+		lease = b.lb.Pick()
+		if lease == nil {
 			break
 		}
+		node = lease.Node()
 
 		u, perr := parseUpstream(node.Address)
 		if perr != nil {
@@ -129,7 +130,8 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 
 		// 记一次失败给被动健康 + 熔断器
-		b.pool.RecordResult(node, false)
+		lease.Done(false)
+		lease = nil
 
 		slept, delay := sleepBackoff(req.Context(), b.svc.RetryBackoffMs, attempt)
 		slog.Warn("retry",
@@ -157,7 +159,9 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if err != nil {
-		b.pool.RecordResult(node, false)
+		if lease != nil {
+			lease.Done(false)
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
 		} else {
@@ -173,7 +177,9 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// 成功路径：最终状态码记被动健康（成功只记成功，不误记失败）
-	b.pool.RecordResult(node, resp.StatusCode < 500)
+	lease.Done(resp.StatusCode < 500)
+	lease = nil
+
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
