@@ -1,4 +1,4 @@
-package main
+package gatewayapp
 
 import (
 	"testing"
@@ -7,7 +7,7 @@ import (
 )
 
 func TestAISeedFromYAML(t *testing.T) {
-	cfg := aiConfig{
+	cfg := AIConfig{
 		Enabled: true,
 		Providers: map[string]aiProviderConfig{
 			"zhipu": {

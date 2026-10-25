@@ -1,4 +1,4 @@
-package main
+package gatewayapp
 
 import (
 	"context"
@@ -14,12 +14,12 @@ import (
 // 与 AI 配置热更新保持一致：管理面改完，最坏多等一个周期。
 const authCachePollInterval = 3 * time.Second
 
-// watchAuthVersion 轮询 auth_version，发现变化就清空鉴权缓存。
+// WatchAuthVersion 轮询 auth_version，发现变化就清空鉴权缓存。
 //
 // 鉴权缓存存的是整个 model.APIKey（含 allowed_models 和租户限额），
 // 不失效的话，改白名单要等 TTL 过期才生效。版本号由管理面写 API Key /
 // 租户时在同一个事务里 +1。
-func watchAuthVersion(ctx context.Context, db *pgxpool.Pool, a *middleware.Authenticator) {
+func WatchAuthVersion(ctx context.Context, db *pgxpool.Pool, a *middleware.Authenticator) {
 	last := int64(-1)
 	ticker := time.NewTicker(authCachePollInterval)
 	defer ticker.Stop()

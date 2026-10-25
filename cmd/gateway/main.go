@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bobdfy/flowgate/internal/gateway"
+	"github.com/bobdfy/flowgate/internal/gatewayapp"
 	"github.com/bobdfy/flowgate/internal/loadbalance"
 	"github.com/bobdfy/flowgate/internal/logsink"
 	"github.com/bobdfy/flowgate/internal/middleware"
@@ -98,7 +99,7 @@ func main() {
 	// TPM 窗口：数据库是事实来源，-tpm-window 只用于首启种子。
 	// 管理面改窗口后，下面的 watcher 会热切换。
 	settingsStore := postgres.NewSettingsStore(db)
-	window, windowSource := resolveTPMWindow(context.Background(), settingsStore, *tpmWindow)
+	window, windowSource := gatewayapp.ResolveTPMWindow(context.Background(), settingsStore, *tpmWindow)
 	tpm := quota.NewRedisTPMWithWindow(rdb, window)
 	slog.Info("tpm_window", "window", tpm.Window().String(), "source", windowSource)
 	// 把窗口长度告诉管理面，TPM 用量查询才能对齐同一个窗口。
@@ -107,7 +108,7 @@ func main() {
 	}
 	settingsCtx, settingsCancel := context.WithCancel(context.Background())
 	defer settingsCancel()
-	go watchTPMWindow(settingsCtx, settingsStore, tpm)
+	go gatewayapp.WatchTPMWindow(settingsCtx, settingsStore, tpm)
 
 	Limiter := ratelimit.NewFallbackLimiter(redisL, local, ratelimit.FailMode(*failMode))
 
@@ -122,7 +123,7 @@ func main() {
 		// 缓存必须能被管理面改动作废，否则改白名单要等 TTL 过期。
 		authCtx, authCancel := context.WithCancel(context.Background())
 		defer authCancel()
-		go watchAuthVersion(authCtx, db, authenticator)
+		go gatewayapp.WatchAuthVersion(authCtx, db, authenticator)
 	} else {
 		authenticator = middleware.NewAuthenticator(apiKeyStore)
 	}
@@ -225,14 +226,14 @@ func main() {
 		}
 	}()
 
-	aiCfg, cfgErr := loadAIConfig(*aiConfigPath)
+	aiCfg, cfgErr := gatewayapp.LoadAIConfig(*aiConfigPath)
 	if cfgErr != nil {
 		slog.Error("ai_config_load_failed", "path", *aiConfigPath, "err", cfgErr)
 		aiCfg = nil
 	}
 	if aiCfg == nil {
 		// ai.yaml 不存在也不代表 AI 关闭：DB 里的配置仍然是配置源。
-		aiCfg = &aiConfig{Enabled: true}
+		aiCfg = &gatewayapp.AIConfig{Enabled: true}
 	}
 	aiCfg.Enabled = *aiEnabled
 
@@ -247,7 +248,7 @@ func main() {
 	// DB 是配置的事实来源；ai.yaml 只做首次种子和 DB 不可用时的回退。
 	aiCtx, aiCancel := context.WithCancel(context.Background())
 	defer aiCancel()
-	aiRT := newAIRuntime(aiCtx, *aiCfg, tpm, aiConfigStore, usageStore)
+	aiRT := gatewayapp.NewAIRuntime(aiCtx, *aiCfg, tpm, aiConfigStore, usageStore)
 	aiRT.Start(aiCtx)
 
 	// 节点健康 + AI 加载结果只在本进程内存里，定期写 Redis 给管理面读取。
@@ -266,16 +267,16 @@ func main() {
 		}
 		return out
 	}
-	go publishRuntimeStatus(runtimeCtx, rdb, instance, snapshotPools, aiRT.Status)
+	go gatewayapp.PublishRuntimeStatus(runtimeCtx, rdb, instance, snapshotPools, aiRT.Status)
 
 	// 网关自己拒绝请求时回什么 body：AI 路径回 OpenAI 错误结构，其余回纯文本。
-	errorResponder := middleware.OpenAIErrorResponder(isAIRoute)
+	errorResponder := middleware.OpenAIErrorResponder(gatewayapp.IsAIRoute)
 
 	handler := middleware.RequestID(
 		middleware.Logging(
 			authenticator.RequireAuth(
 				middleware.RateLimitPair(
-					Limiter, pairKey, aiRouter(aiRT.Handler, router),
+					Limiter, pairKey, gatewayapp.AIRouter(aiRT.Handler, router),
 					errorResponder,
 				),
 				errorResponder,

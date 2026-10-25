@@ -1,4 +1,4 @@
-package main
+package gatewayapp
 
 import (
 	"context"
@@ -11,11 +11,11 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// publishRuntimeStatus 周期性把节点健康与 AI 配置加载结果写入 Redis，
+// PublishRuntimeStatus 周期性把节点健康与 AI 配置加载结果写入 Redis，
 // 供管理面的只读接口（/api/v1/runtime/*）查询。
 //
 // pools 是快照函数而不是 map 本身：路由刷新会并发修改 map，拿快照更安全。
-func publishRuntimeStatus(
+func PublishRuntimeStatus(
 	ctx context.Context,
 	rdb *redis.Client,
 	instance string,

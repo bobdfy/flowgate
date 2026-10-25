@@ -1,5 +1,6 @@
-// 运行时设置的轮询与热切换（目前只有 TPM 窗口）。
-package main
+package gatewayapp
+
+// 运行时设置的轮询与热切换（目前只有 TPM 窗口）
 
 import (
 	"context"
@@ -13,10 +14,10 @@ import (
 // tpmWindowPollInterval 与管理面改配置后的生效延迟一致（与 AI 配置相同）。
 const tpmWindowPollInterval = 3 * time.Second
 
-// resolveTPMWindow 决定启动时用哪个窗口：
+// ResolveTPMWindow 决定启动时用哪个窗口：
 //  1. 数据库里有配置 → 用它（事实来源）；
 //  2. 没有配置 → 用 -tpm-window 兜底，并写回数据库作为初始配置。
-func resolveTPMWindow(ctx context.Context, store *postgres.SettingsStore, fallback time.Duration) (time.Duration, string) {
+func ResolveTPMWindow(ctx context.Context, store *postgres.SettingsStore, fallback time.Duration) (time.Duration, string) {
 	secs, _, err := store.TPMWindow(ctx)
 	if err != nil {
 		slog.Warn("tpm_window_setting_unavailable", "err", err)
@@ -38,11 +39,11 @@ func resolveTPMWindow(ctx context.Context, store *postgres.SettingsStore, fallba
 	return fallback, "flag-seeded"
 }
 
-// watchTPMWindow 每 3 秒读一次数据库，窗口变化时热切换并重新发布到 Redis。
+// WatchTPMWindow 每 3 秒读一次数据库，窗口变化时热切换并重新发布到 Redis。
 //
 // 切换对在途请求安全：Reserve 返回的 Reservation 里带 key，
 // Settle 用的还是旧窗口的 key，不会把旧请求算进新窗口。
-func watchTPMWindow(ctx context.Context, store *postgres.SettingsStore, tpm *quota.RedisTPM) {
+func WatchTPMWindow(ctx context.Context, store *postgres.SettingsStore, tpm *quota.RedisTPM) {
 	ticker := time.NewTicker(tpmWindowPollInterval)
 	defer ticker.Stop()
 

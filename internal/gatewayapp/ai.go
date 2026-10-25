@@ -1,5 +1,6 @@
+package gatewayapp
+
 // 网关对 AI Gateway 的装配代码。
-package main
 
 import (
 	"context"
@@ -41,7 +42,7 @@ type aiModelConfig struct {
 }
 
 // aiConfig 是 AI Gateway 的完整配置。
-type aiConfig struct {
+type AIConfig struct {
 	Enabled   bool
 	Providers map[string]aiProviderConfig
 	Models    []aiModelConfig
@@ -66,9 +67,9 @@ type yamlConfig struct {
 	} `yaml:"models"`
 }
 
-// loadAIConfig 读 ai.yaml 并转成运行时配置。
+// LoadAIConfig 读 ai.yaml 并转成运行时配置。
 // 文件存在但格式错 → 返回 error，调用方记日志后降级
-func loadAIConfig(path string) (*aiConfig, error) {
+func LoadAIConfig(path string) (*AIConfig, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -82,7 +83,7 @@ func loadAIConfig(path string) (*aiConfig, error) {
 		return nil, fmt.Errorf("解析 %s 失败: %w", path, err)
 	}
 
-	cfg := &aiConfig{
+	cfg := &AIConfig{
 		Enabled:   true,
 		Providers: make(map[string]aiProviderConfig, len(yc.Providers)),
 	}
@@ -148,7 +149,7 @@ func expandEnv(in []string) []string {
 //
 // 配置来源优先级：DB > ai.yaml。
 // 启动时若 DB 为空，用 ai.yaml 做一次性种子；DB 查询失败则保留旧 handler。
-type aiRuntime struct {
+type AIRuntime struct {
 	store   *postgres.AIConfigStore
 	tpm     quota.Limiter
 	usage   *postgres.UsageStore // 可为 nil（不记录用量）
@@ -160,9 +161,9 @@ type aiRuntime struct {
 	status   model.AIRuntimeStatus
 }
 
-// newAIRuntime 构建运行时：先用 ai.yaml 兜底，再尝试导入种子并切到 DB 配置。
-func newAIRuntime(ctx context.Context, cfg aiConfig, tpm quota.Limiter, store *postgres.AIConfigStore, usage *postgres.UsageStore) *aiRuntime {
-	rt := &aiRuntime{store: store, tpm: tpm, usage: usage}
+// NewAIRuntime 构建运行时：先用 ai.yaml 兜底，再尝试导入种子并切到 DB 配置。
+func NewAIRuntime(ctx context.Context, cfg AIConfig, tpm quota.Limiter, store *postgres.AIConfigStore, usage *postgres.UsageStore) *AIRuntime {
+	rt := &AIRuntime{store: store, tpm: tpm, usage: usage}
 	rt.handler.Store(buildAIHandler(cfg, tpm, usage))
 	rt.status.Enabled = cfg.Enabled
 	if cfg.Enabled && len(cfg.Models) > 0 {
@@ -195,7 +196,7 @@ func newAIRuntime(ctx context.Context, cfg aiConfig, tpm quota.Limiter, store *p
 }
 
 // reload 从 DB 拉一份快照并重建 handler。失败时保留当前 handler（fail-static）。
-func (rt *aiRuntime) reload(ctx context.Context) {
+func (rt *AIRuntime) reload(ctx context.Context) {
 	providers, models, version, err := rt.store.Snapshot(ctx)
 	if err != nil {
 		slog.Warn("ai_config_reload_failed", "err", err)
@@ -221,7 +222,7 @@ func (rt *aiRuntime) reload(ctx context.Context) {
 }
 
 // recordError 记录最近一次加载失败；已生效的配置不受影响（fail-static）。
-func (rt *aiRuntime) recordError(err error) {
+func (rt *AIRuntime) recordError(err error) {
 	rt.statusMu.Lock()
 	defer rt.statusMu.Unlock()
 	now := time.Now().UTC()
@@ -230,14 +231,14 @@ func (rt *aiRuntime) recordError(err error) {
 }
 
 // Status 返回最近一次 AI 配置加载结果（值拷贝）。
-func (rt *aiRuntime) Status() model.AIRuntimeStatus {
+func (rt *AIRuntime) Status() model.AIRuntimeStatus {
 	rt.statusMu.RLock()
 	defer rt.statusMu.RUnlock()
 	return rt.status
 }
 
 // Start 每 3 秒查一次版本号，变了才重建 handler。
-func (rt *aiRuntime) Start(ctx context.Context) {
+func (rt *AIRuntime) Start(ctx context.Context) {
 	if rt.store == nil {
 		return
 	}
@@ -265,13 +266,13 @@ func (rt *aiRuntime) Start(ctx context.Context) {
 }
 
 // Handler 返回当前生效的 AI handler（可能为 nil）。
-func (rt *aiRuntime) Handler() *ai.Handler {
+func (rt *AIRuntime) Handler() *ai.Handler {
 	return rt.handler.Load()
 }
 
 // aiConfigFromDB 把 DB 快照转成 buildAIHandler 认识的配置。
-func aiConfigFromDB(providers []model.AIProvider, models []model.AIModel) aiConfig {
-	cfg := aiConfig{
+func aiConfigFromDB(providers []model.AIProvider, models []model.AIModel) AIConfig {
+	cfg := AIConfig{
 		Enabled:   true,
 		Providers: make(map[string]aiProviderConfig, len(providers)),
 	}
@@ -313,7 +314,7 @@ var aiEnvNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // aiSeedFromYAML 把 ai.yaml 转成首次入库的 provider / model 记录。
 //
 // 只存环境变量名（${VAR} → api_key_env），字面量 key（本地假上游）才存 api_key。
-func aiSeedFromYAML(cfg aiConfig) ([]model.AIProvider, []model.AIModel) {
+func aiSeedFromYAML(cfg AIConfig) ([]model.AIProvider, []model.AIModel) {
 	keys := make([]string, 0, len(cfg.Providers))
 	for k := range cfg.Providers {
 		keys = append(keys, k)
@@ -380,7 +381,7 @@ func envPlaceholder(s string) (string, bool) {
 }
 
 // buildAIHandler 按配置构造 AI 处理器；没有可用 model 时返回 nil。
-func buildAIHandler(cfg aiConfig, tpm quota.Limiter, usage *postgres.UsageStore) *ai.Handler {
+func buildAIHandler(cfg AIConfig, tpm quota.Limiter, usage *postgres.UsageStore) *ai.Handler {
 	if !cfg.Enabled {
 		slog.Info("ai_gateway_off", "hint", "去掉 -ai=false 可启用")
 		return nil
@@ -447,13 +448,13 @@ func buildAIHandler(cfg aiConfig, tpm quota.Limiter, usage *postgres.UsageStore)
 	return h
 }
 
-// aiRouter 按路径分流：命中的 AI 路径走当前 handler，其余交给 fallback。
+// AIRouter 按路径分流：命中的 AI 路径走当前 handler，其余交给 fallback。
 //
 // handler 用 getter 传入，这样配置热更新时无需重建中间件链。
 //
 //	RequestID → Logging → RequireAuth → RateLimit(租户) → RateLimit(key)
 //	  →  分流 → AI / 普通代理
-func aiRouter(get func() *ai.Handler, fallback http.Handler) http.Handler {
+func AIRouter(get func() *ai.Handler, fallback http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := ai.ApiNameFromPath(r.Method, r.URL.Path); ok {
 			if h := get(); h != nil {
@@ -465,8 +466,8 @@ func aiRouter(get func() *ai.Handler, fallback http.Handler) http.Handler {
 	})
 }
 
-// isAIRoute 报告某个请求是否命中 AI 路径。
-func isAIRoute(r *http.Request) bool {
+// IsAIRoute 报告某个请求是否命中 AI 路径。
+func IsAIRoute(r *http.Request) bool {
 	_, ok := ai.ApiNameFromPath(r.Method, r.URL.Path)
 	return ok
 }
