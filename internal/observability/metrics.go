@@ -123,6 +123,27 @@ var (
 		[]string{"route"},
 	)
 
+	//  日志队列（logsink）
+	//
+	// 日志改为「单 goroutine + 有界队列」之后，队列满会丢日志。
+	// 这两个指标让“丢了多少、当前积压多少”可见，而不是静默丢失。
+
+	// 被丢弃的日志条数（队列满 / sink 已关闭 / 下游写失败）
+	LogDroppedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowgate_log_dropped_total",
+			Help: "被丢弃的日志条数（队列满、sink 已关闭或下游写失败）",
+		},
+	)
+
+	// 日志队列当前积压条数
+	LogQueueDepth = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "flowgate_log_queue_depth",
+			Help: "日志队列当前积压条数",
+		},
+	)
+
 	// ===================== PostgreSQL 连接池（pgxpool）观测 =====================
 	//
 	// 为什么要有这组指标：为了定位「同一进程连续压测，QPS 逐轮劣化、重启即恢复」。
@@ -263,6 +284,9 @@ func init() {
 		QueueDepth,
 		BulkheadInflight,
 		BulkheadRejectedTotal,
+		// 日志队列
+		LogDroppedTotal,
+		LogQueueDepth,
 		// PostgreSQL 连接池观测
 		PGPoolAcquiredConns,
 		PGPoolIdleConns,

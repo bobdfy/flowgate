@@ -88,7 +88,7 @@ func (p *NodePool) AvailableNodes() []*NodeState {
 			out = append(out, n)
 		case StateHalfOpen:
 			if n.HalfOpenInFlight < p.CBHalfOpenLimit {
-				n.HalfOpenInFlight++
+				n.HalfOpenInFlight++ //
 				out = append(out, n)
 			}
 		case StateOpen:

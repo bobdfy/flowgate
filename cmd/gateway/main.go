@@ -4,9 +4,9 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -20,6 +20,7 @@ import (
 
 	"github.com/bobdfy/flowgate/internal/gateway"
 	"github.com/bobdfy/flowgate/internal/loadbalance"
+	"github.com/bobdfy/flowgate/internal/logsink"
 	"github.com/bobdfy/flowgate/internal/middleware"
 	"github.com/bobdfy/flowgate/internal/quota"
 	"github.com/bobdfy/flowgate/internal/ratelimit"
@@ -37,10 +38,11 @@ func main() {
 	//
 	// ★ 性能关键：不能直接写 os.Stdout。slog 每次日志都是一次 syscall，
 	// 压测时 access_log 每请求写一次 stdout 会变成最大 CPU 热点（实测 ~30%）。
-	// 用 bufio.Writer 把小块 JSON 攒成 64KB 批量落盘，后台 goroutine 定时 flush，
-	// 把每请求一次的 WSASend 系统调用降为「几乎纯内存写」。
-	logWriter := bufio.NewWriterSize(os.Stdout, 64*1024)
-	slog.SetDefault(slog.New(slog.NewJSONHandler(logWriter, nil)))
+	// logsink 内部用 bufio.Writer 把小块 JSON 攒成 64KB 批量落盘，单 goroutine 定时 flush；
+	// 请求 goroutine 只做拷贝 + 非阻塞入队，既避免了 bufio 的并发竞态，
+	// 也不会被慢速 stdout 阻塞（队列满时丢弃并计数）。
+	logSink := logsink.New(os.Stdout, 64*1024, 4096, 200*time.Millisecond)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logSink, nil)))
 
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
@@ -189,24 +191,6 @@ func main() {
 	// 单独一个而不是复用 hcCtx：语义不同，健康检查归健康检查、观测归观测，
 	statsCtx, statsCancel := context.WithCancel(context.Background())
 	defer statsCancel()
-
-	// 日志缓冲 flush goroutine：每 200ms 把攒下的日志刷到 stdout。
-	// 200ms 的延迟对运维日志可接受；极端情况进程被杀最多丢最后 200ms 日志。
-	logCtx, logCancel := context.WithCancel(context.Background())
-	defer logCancel()
-	go func() {
-		ticker := time.NewTicker(200 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				_ = logWriter.Flush()
-			case <-logCtx.Done():
-				_ = logWriter.Flush()
-				return
-			}
-		}
-	}()
 
 	//记录已启动的健康检查的池
 	started := map[int64]bool{}
@@ -357,8 +341,19 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("gateway 优雅关闭失败: %v", err)
 	}
-	// 停掉 flush goroutine 并最后一次刷盘，确保缓冲区里的日志不丢。
-	logCancel()
-	_ = logWriter.Flush()
-	log.Println("gateway 已退出")
+	// 关闭日志 sink：排干队列并做最后一次 flush。
+	//
+	// 注意两点：
+	//   1. 当前 Go 版本里 slog.SetDefault 会把标准库 log 也桥接到 slog，
+	//      所以 Close 之后再 log 的内容会被丢弃（计入 dropped）；
+	//      退出类信息必须在 Close 之前发出，由 Close 负责刷盘。
+	//   2. 函数末尾的 deferred cancel 会在这之后才停掉健康检查等后台 goroutine，
+	//      它们若再写日志同样计入 dropped，不影响正确性。
+	if n := logSink.Dropped(); n > 0 {
+		slog.Warn("log_queue_overflow", "dropped", n)
+	}
+	slog.Info("gateway 已退出")
+	if err := logSink.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "日志落盘失败: %v\n", err)
+	}
 }
