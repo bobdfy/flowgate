@@ -43,6 +43,8 @@ const (
 func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	start := time.Now()
 
+	origCtx := req.Context()
+
 	// 整体超时：整个「重试过程」共享同一个 deadline(RoundTrip 和退避都受它约束)
 	if timeout := time.Duration(b.svc.RequestTimeoutMs) * time.Millisecond; timeout > 0 {
 		ctx, cancel := context.WithTimeout(req.Context(), timeout)
@@ -59,7 +61,7 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	defer func() {
 		if lease != nil {
-			lease.Done(false)
+			lease.Done(loadbalance.OutcomeFailure)
 		}
 	}()
 
@@ -130,7 +132,7 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 
 		// 记一次失败给被动健康 + 熔断器
-		lease.Done(false)
+		b.settle(lease, origCtx, err, statusCode)
 		lease = nil
 
 		slept, delay := sleepBackoff(req.Context(), b.svc.RetryBackoffMs, attempt)
@@ -160,7 +162,7 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	if err != nil {
 		if lease != nil {
-			lease.Done(false)
+			b.settle(lease, origCtx, err, 0)
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
@@ -177,7 +179,7 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// 成功路径：最终状态码记被动健康（成功只记成功，不误记失败）
-	lease.Done(resp.StatusCode < 500)
+	b.settle(lease, origCtx, nil, resp.StatusCode)
 	lease = nil
 
 	copyHeader(w.Header(), resp.Header)
@@ -303,4 +305,36 @@ func rejectOverload(w http.ResponseWriter, err error, role, name string, inc fun
 
 	http.Error(w, "overload:"+string(rej.Reason), http.StatusServiceUnavailable)
 	return true
+}
+
+// classifyOutcome 判断这次失败记录在谁身上
+func classifyOutcome(origCtx context.Context, err error, status int) (loadbalance.Outcome, string) {
+	if err == nil {
+		if status >= 500 {
+			return loadbalance.OutcomeFailure, "status"
+		}
+		return loadbalance.OutcomeSuccess, ""
+	}
+
+	switch origCtx.Err() {
+	case context.Canceled, context.DeadlineExceeded:
+		return loadbalance.OutcomeNeutral, ""
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return loadbalance.OutcomeFailure, "timeout"
+	}
+	return loadbalance.OutcomeFailure, "error"
+}
+
+// settle 结算一次转发: 记指标 + 归还名额，返回路径都必须走这里
+func (b *Backend) settle(lease *loadbalance.Lease, origCtx context.Context, err error, status int) {
+	outcome, reason := classifyOutcome(origCtx, err, status)
+	switch outcome {
+	case loadbalance.OutcomeFailure:
+		observability.UpstreamFailuresTotal.WithLabelValues(b.svc.Name, reason).Inc()
+	case loadbalance.OutcomeNeutral:
+		observability.ClientCancelTotal.WithLabelValues(b.svc.Name).Inc()
+	}
+	lease.Done(outcome)
 }

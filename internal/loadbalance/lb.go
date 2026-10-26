@@ -48,13 +48,22 @@ type Lease struct {
 	once  sync.Once
 }
 
+// Outcome 一次派发的结算结果
+type Outcome int
+
+const (
+	OutcomeSuccess Outcome = iota
+	OutcomeFailure
+	OutcomeNeutral
+)
+
 // Node 返回本次派发到的节点。
 func (l *Lease) Node() *NodeState { return l.node }
 
 // Done 记录本次转发的最终结果并释放名额。
 // 重复调用只生效一次 —— 这样「正常路径显式调用」和「defer 兜底」可以同时存在。
-func (l *Lease) Done(ok bool) {
-	l.once.Do(func() { l.pool.recordResult(l.node, ok, l.probe) })
+func (l *Lease) Done(o Outcome) {
+	l.once.Do(func() { l.pool.recordResult(l.node, o, l.probe) })
 }
 
 // SetCBConfig 设置熔断参数（连续失败阈值、冷却时长、半开试探上限），非正值参数用默认值兜底。
@@ -213,18 +222,25 @@ func (r *RoundRobin) Pick() *Lease {
 // RecordResult 记录一次检查结果
 // ok = true 表示这次检查通过（活着）
 func (p *NodePool) RecordResult(n *NodeState, ok bool) {
-	p.recordResult(n, ok, false)
+	o := OutcomeFailure
+	if ok {
+		o = OutcomeSuccess
+	}
+	p.recordResult(n, o, false)
 }
 
 // recordResult 在锁内更新计数、释放试探名额并决定是否翻转状态
-func (p *NodePool) recordResult(n *NodeState, ok bool, probe bool) {
+func (p *NodePool) recordResult(n *NodeState, o Outcome, probe bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	from := n.State
 	switch n.State {
 	case StateClosed:
-		if ok {
+		if o == OutcomeNeutral {
+			return
+		}
+		if o == OutcomeSuccess {
 			n.Fails = 0
 			return
 		}
@@ -244,7 +260,10 @@ func (p *NodePool) recordResult(n *NodeState, ok bool, probe bool) {
 		if probe && n.HalfOpenInFlight > 0 {
 			n.HalfOpenInFlight--
 		}
-		if ok {
+		if o == OutcomeNeutral {
+			return
+		}
+		if o == OutcomeSuccess {
 			// 试探成功 → 恢复正常
 			n.State = StateClosed
 			n.Fails = 0

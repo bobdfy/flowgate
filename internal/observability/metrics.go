@@ -270,6 +270,23 @@ var (
 			Help: "因连接池为空而等待的累计耗时（秒）",
 		},
 	)
+
+	UpstreamFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowgate_upstream_failures_total",
+			Help: "记在节点头上的失败次数（客户端取消不计入）",
+		},
+		[]string{"service", "reason"},
+	)
+
+	// 客户端主动取消或自身超时
+	ClientCancelTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowgate_client_cancel_total",
+			Help: "客户端主动取消或因自身超时中断的请求数",
+		},
+		[]string{"service"},
+	)
 )
 
 func init() {
@@ -304,5 +321,7 @@ func init() {
 		PGPoolDestroyedIdleTotal,
 		PGPoolAcquireSecondsTotal,
 		PGPoolEmptyAcquireWaitSecondsTotal,
+		UpstreamFailuresTotal,
+		ClientCancelTotal,
 	)
 }
