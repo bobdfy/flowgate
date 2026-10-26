@@ -54,16 +54,44 @@ func (r *statusRecorder) Flush() {
 	}
 }
 
+// knownMethods 是合法的 HTTP 方法集合，用于把 method 标签压成有界取值。
+var knownMethods = map[string]bool{
+	http.MethodGet: true, http.MethodHead: true, http.MethodPost: true,
+	http.MethodPut: true, http.MethodPatch: true, http.MethodDelete: true,
+	http.MethodOptions: true, http.MethodConnect: true, http.MethodTrace: true,
+}
+
+// methodLabel 归一化 HTTP 方法：自定义动词（客户端随便发）统一记成 OTHER，
+// 否则 method 标签同样可以被构造出无限序列。
+func methodLabel(m string) string {
+	if knownMethods[m] {
+		return m
+	}
+	return "OTHER"
+}
+
 // Logging 记录每个请求的方法、路径、状态码和耗时（结构化，与网关其他日志统一）。
+//
+// 指标标签用「路由模板」而不是原始路径：路径由客户端控制，
+// 直接当标签会让随机 URL 不断造出新的时间序列，把 Prometheus 打爆。
+// 日志里保留原始 path（日志没有基数问题），另加 route 字段便于对照。
 func Logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		// 内层（路由 / 鉴权 / 限流 / AI 分流）把命中的有界标签写进这个持有者
+		r = r.WithContext(withRouteLabel(r.Context()))
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
+
+		route := RouteLabel(r.Context())
+		if route == "" {
+			route = LabelUnmatched
+		}
 
 		slog.Info("access_log",
 			"method", r.Method,
 			"path", r.URL.Path,
+			"route", route,
 			"status", rec.status,
 			"duration_ms", time.Since(start).Milliseconds(),
 			"request_id", r.Header.Get("X-Request-ID"),
@@ -71,7 +99,8 @@ func Logging(next http.Handler) http.Handler {
 
 		duration := time.Since(start)
 		status := strconv.Itoa(rec.status)
-		observability.RequestDuration.WithLabelValues(r.Method, r.URL.Path, status).Observe(duration.Seconds())
-		observability.RequestTotal.WithLabelValues(r.Method, r.URL.Path, status).Inc()
+		method := methodLabel(r.Method)
+		observability.RequestDuration.WithLabelValues(method, route, status).Observe(duration.Seconds())
+		observability.RequestTotal.WithLabelValues(method, route, status).Inc()
 	})
 }

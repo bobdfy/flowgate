@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bobdfy/flowgate/internal/ai"
+	"github.com/bobdfy/flowgate/internal/middleware"
 	"github.com/bobdfy/flowgate/internal/model"
 	"github.com/bobdfy/flowgate/internal/provider"
 	"github.com/bobdfy/flowgate/internal/quota"
@@ -456,7 +457,9 @@ func buildAIHandler(cfg AIConfig, tpm quota.Limiter, usage *postgres.UsageStore)
 //	  →  分流 → AI / 普通代理
 func AIRouter(get func() *ai.Handler, fallback http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := ai.ApiNameFromPath(r.Method, r.URL.Path); ok {
+		if name, ok := ai.ApiNameFromPath(r.Method, r.URL.Path); ok {
+			// AI 路径不在路由表里，标签用固定前缀 + API 名（枚举值，基数有界）
+			middleware.SetRouteLabel(r, middleware.LabelAI+"/"+string(name))
 			if h := get(); h != nil {
 				h.ServeHTTP(w, r)
 				return

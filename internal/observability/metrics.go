@@ -10,7 +10,10 @@ var (
 			Help:    "请求处理耗时（秒）",
 			Buckets: prometheus.DefBuckets, // 默认分桶
 		},
-		[]string{"method", "path", "status"}, // 标签
+		// route 是「路由模板」（配置里的 path_pattern）或固定枚举值
+		// （unmatched / auth_rejected / rate_limited / ai/chat ...），不是原始 URL：
+		// 原始路径由客户端控制，直接当标签会造出无界的时间序列。
+		[]string{"method", "route", "status"},
 	)
 
 	// 请求总数（Counter：只增不减）
@@ -19,7 +22,7 @@ var (
 			Name: "flowgate_requests_total",
 			Help: "请求总数",
 		},
-		[]string{"method", "path", "status"},
+		[]string{"method", "route", "status"},
 	)
 
 	// 限流拒绝数（Counter）

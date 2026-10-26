@@ -64,6 +64,8 @@ func apiKeyFromRequest(r *http.Request) string {
 // → hash 查库 → nil 则 401 → 注入 context 放行。
 func (a *Authenticator) RequireAuth(next http.Handler, responder ErrorResponder) http.Handler {
 	fail := func(w http.ResponseWriter, r *http.Request, status int, msg string) {
+		// 鉴权失败发生在路由之前，指标标签用固定值而不是路径
+		SetRouteLabel(r, LabelAuthRejected)
 		if responder != nil {
 			responder(w, r, status, msg)
 			return
