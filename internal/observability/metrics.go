@@ -287,6 +287,15 @@ var (
 		},
 		[]string{"service"},
 	)
+
+	// TPM 配额在 Redis 故障下按降级策略处理的次数
+	TPMDegradedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowgate_tpm_degraded_total",
+			Help: "TPM 配额在 Redis 故障时按降级策略处理的次数",
+		},
+		[]string{"mode"},
+	)
 )
 
 func init() {
@@ -323,5 +332,6 @@ func init() {
 		PGPoolEmptyAcquireWaitSecondsTotal,
 		UpstreamFailuresTotal,
 		ClientCancelTotal,
+		TPMDegradedTotal,
 	)
 }

@@ -242,9 +242,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			need := estimateNeed(body)
 			res, d, qerr := h.tpm.Reserve(r.Context(), id.TenantID, need, id.TenantTPM)
 			switch {
+			case errors.Is(qerr, quota.ErrUnavailable):
+				writeError(w, http.StatusServiceUnavailable, ErrTypeGateway, "配额服务暂不可用，请稍后重试")
+				return
 			case qerr != nil:
 				slog.Error("tpm_reserve_failed",
 					"tenant_id", id.TenantID, "model", req.Model, "err", qerr)
+				writeError(w, http.StatusInternalServerError, ErrTypeGateway, "配额校验失败")
+				return
 			case !d.Allowed:
 				retryAfter := int(math.Ceil(d.RetryAfter.Seconds()))
 				if retryAfter > 0 {

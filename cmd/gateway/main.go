@@ -61,7 +61,11 @@ func main() {
 	// 管理面改窗口后，下面的 watcher 会热切换。
 	settingsStore := postgres.NewSettingsStore(db)
 	window, windowSource := gatewayapp.ResolveTPMWindow(context.Background(), settingsStore, cfg.TPMWindow)
+
 	tpm := quota.NewRedisTPMWithWindow(rdb, window)
+
+	tpmLimiter := quota.NewFallbackTPM(tpm, quota.NewLocalTPM(tpm.Window()), quota.FailMode(cfg.TPMFailMode))
+
 	slog.Info("tpm_window", "window", tpm.Window().String(), "source", windowSource)
 	// 把窗口长度告诉管理面，TPM 用量查询才能对齐同一个窗口。
 	if err := tpm.PublishWindow(context.Background()); err != nil {
@@ -75,6 +79,7 @@ func main() {
 
 	// ---- 鉴权（可选进程内缓存） ----
 	apiKeyStore := postgres.NewAPIKeyStore(db)
+
 	aiConfigStore := postgres.NewAIConfigStore(db)
 
 	var authenticator *middleware.Authenticator
@@ -129,7 +134,8 @@ func main() {
 	// DB 是配置的事实来源；ai.yaml 只做首次种子和 DB 不可用时的回退。
 	aiCtx, aiCancel := context.WithCancel(context.Background())
 	defer aiCancel()
-	aiRT := gatewayapp.NewAIRuntime(aiCtx, *aiCfg, tpm, aiConfigStore, usageStore)
+
+	aiRT := gatewayapp.NewAIRuntime(aiCtx, *aiCfg, tpmLimiter, aiConfigStore, usageStore)
 	aiRT.Start(aiCtx)
 
 	// 节点健康 + AI 加载结果只在本进程内存里，定期写 Redis 给管理面读取。

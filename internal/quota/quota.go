@@ -10,6 +10,7 @@ type Reservation struct {
 	Key      string
 	Reserved int64
 	Limit    int64
+	Local    bool
 }
 
 // Decision 预扣结果
