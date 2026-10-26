@@ -93,6 +93,11 @@ func forwardOnce(transport *http.Transport, req *http.Request, target *url.URL) 
 
 	removeByHopHeaders(outReq.Header)
 
+	// 网关的鉴权凭据只对网关这一跳有效，绝不能流到上游。
+	// 上游需要认证时由服务配置注入独立凭据
+	outReq.Header.Del("Authorization")
+	outReq.Header.Del("X-API-Key")
+
 	// 覆盖客户端伪造的 X-Forwarded-For / X-Real-IP，统一由网关填真实来源。
 	if ip, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
 		outReq.Header.Del("X-Forwarded-For")

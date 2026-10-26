@@ -46,7 +46,6 @@ func (a *Authenticator) InvalidateCache() {
 // apiKeyFromRequest 取客户端 key：优先 X-API-Key，其次 Authorization: Bearer。
 //
 // 后者是为了兼容 OpenAI SDK / agent 这类只会发 Bearer 的客户端；
-// Authorization 本身不在转发白名单里，因此不会泄露给上游。
 func apiKeyFromRequest(r *http.Request) string {
 	if key := strings.TrimSpace(r.Header.Get("X-API-Key")); key != "" {
 		return key
