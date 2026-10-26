@@ -51,6 +51,12 @@ services:
       DATABASE_URL: postgres://flowgate:flowgate@postgres:5432/flowgate
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: flowgate
+      # 拨号期 SSRF 白名单（空=禁止所有内网地址）。
+      # 容器里要访问的「内网」有两类：
+      #   - host.docker.internal → Docker 桥接网段（172.16.0.0/12）
+      #   - 宿主机上的 mockai（8095）、ollama 等，同样走 host.docker.internal
+      # 生产环境按实际部署网段收窄，不要直接照抄。
+      ALLOW_UPSTREAM_CIDRS: "172.16.0.0/12"
     ports:
       - "8090:8090"
       - "127.0.0.1:9090:9090"
@@ -72,7 +78,8 @@ services:
     command: ["-addr", ":8092", "-web-dir", "/app/web"]
     environment:
       DATABASE_URL: postgres://flowgate:flowgate@postgres:5432/flowgate
-      ALLOW_PRIVATE_UPSTREAM: "1"
+      # 配置期 SSRF 白名单，与 gateway 的 -allow-upstream-cidrs 同一套规则。
+      ALLOW_UPSTREAM_CIDRS: "172.16.0.0/12,127.0.0.1/32"
       # 只用于查询租户当窗 TPM 用量；不配也能启动，接口返回 503。
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: flowgate

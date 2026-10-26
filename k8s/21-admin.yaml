@@ -27,8 +27,10 @@ spec:
                 secretKeyRef:
                   name: flowgate-secret
                   key: DATABASE_URL
-            - name: ALLOW_PRIVATE_UPSTREAM
-              value: "1"
+            # 集群内上游（Service 名解析到 Pod/ClusterIP）需要放行集群网段；
+            # 按实际 CNI 网段改，默认 k3s 是 10.42.0.0/16 + 10.43.0.0/16。
+            - name: ALLOW_UPSTREAM_CIDRS
+              value: "10.42.0.0/16,10.43.0.0/16"
           readinessProbe:
             httpGet:
               path: /api/v1/health

@@ -99,7 +99,7 @@ export function NodeFormModal({
             htmlFor={addressId}
             required
             fullWidth
-            hint="必须是完整的 http/https URL，例如 http://10.0.0.8:8080。admin 会解析并拒绝内网 / 回环地址，除非设置 ALLOW_PRIVATE_UPSTREAM=1。"
+            hint="必须是完整的 http/https URL，例如 http://10.0.0.8:8080。admin 会解析并拒绝内网 / 回环地址，除非该网段写进了 ALLOW_UPSTREAM_CIDRS 白名单。"
           >
             <input
               id={addressId}

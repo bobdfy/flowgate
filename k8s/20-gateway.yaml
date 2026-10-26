@@ -37,6 +37,9 @@ spec:
                 secretKeyRef:
                   name: flowgate-secret
                   key: REDIS_PASSWORD
+            # 拨号期 SSRF 白名单：集群内上游是私有地址，不放行会被直接拒绝连。
+            - name: ALLOW_UPSTREAM_CIDRS
+              value: "10.42.0.0/16,10.43.0.0/16"
           readinessProbe:
             tcpSocket:
               port: 8090

@@ -4,7 +4,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
+
+	"github.com/bobdfy/flowgate/internal/model"
+	"github.com/bobdfy/flowgate/internal/netguard"
 )
 
 // forwardTo 起一个回显上游，用给定的请求头走一次 forwardOnce，
@@ -62,6 +66,52 @@ func TestForwardOnceStripsGatewayCredentials(t *testing.T) {
 	if v := got.Get("Content-Type"); v != "application/json" {
 		t.Fatalf("Content-Type 被误删: %q", v)
 	}
+}
+
+// ProxyCache 造出来的 Transport 必须在拨号层拦住内网地址：
+// 配置期的检查挡不住 DNS rebinding，这是最后一道防线。
+func TestProxyCacheBlocksPrivateUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := model.Service{ConnectTimeoutMs: 1000}
+
+	t.Run("白名单为空时拒绝", func(t *testing.T) {
+		cache := NewProxyCache(nil)
+		transport := cache.get(target, svc)
+		defer transport.CloseIdleConnections()
+
+		resp, err := transport.RoundTrip(httptest.NewRequest(http.MethodGet, upstream.URL, nil))
+		if err == nil {
+			resp.Body.Close()
+			t.Fatal("回环地址应当被拨号层拒绝")
+		}
+		if !strings.Contains(err.Error(), "拒绝连接内网地址") {
+			t.Fatalf("错误信息应能看出是 SSRF 拦截, got: %v", err)
+		}
+	})
+
+	t.Run("显式白名单放行", func(t *testing.T) {
+		policy, err := netguard.NewPolicy([]string{"127.0.0.1/32"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cache := NewProxyCache(policy)
+		transport := cache.get(target, svc)
+		defer transport.CloseIdleConnections()
+
+		resp, err := transport.RoundTrip(httptest.NewRequest(http.MethodGet, upstream.URL, nil))
+		if err != nil {
+			t.Fatalf("白名单内的地址应能拨通: %v", err)
+		}
+		resp.Body.Close()
+	})
 }
 
 // 客户端伪造的 X-Forwarded-For / X-Real-IP 必须被网关的真实来源覆盖。

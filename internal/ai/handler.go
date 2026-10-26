@@ -17,6 +17,7 @@ import (
 
 	"github.com/bobdfy/flowgate/internal/identity"
 	"github.com/bobdfy/flowgate/internal/model"
+	"github.com/bobdfy/flowgate/internal/netguard"
 	"github.com/bobdfy/flowgate/internal/quota"
 )
 
@@ -72,11 +73,37 @@ type Handler struct {
 	usage UsageRecorder
 }
 
-// NewHandler 创建 AI 处理器。
-func NewHandler(provider map[string]*ProviderEntry) *Handler {
+// NewClient 构造 AI 链路的 HTTP 客户端。policy 为 nil 时默认拒绝所有内网上游。
+//
+//	客户端要由调用方创建一次并长期复用，不要在每次重建 Handler 时新建
+func NewClient(policy *netguard.Policy) *http.Client {
+	transport := &http.Transport{
+		// 拨号层校验与普通转发共用 netguard，不因为走的是 AI 链路就放宽。
+		DialContext:         policy.Dialer(5 * time.Second).DialContext,
+		MaxIdleConnsPerHost: 64,
+		// 即使 Transport 被换掉，空闲连接也会在 90s 后自行关闭，不会无限堆积。
+		IdleConnTimeout: 90 * time.Second,
+	}
+
+	return &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: transport,
+		// 不跟随重定向：上游一个 302 就能把请求带到内网地址，
+		// 而 AI 接口没有靠重定向做业务的场景。
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// NewHandler 创建 AI 处理器。client 由调用方持有并复用（见 NewClient）。
+func NewHandler(provider map[string]*ProviderEntry, client *http.Client) *Handler {
+	if client == nil {
+		client = NewClient(nil) // 兜底：宁可全拒，也不能变成不校验
+	}
 	return &Handler{
 		providers: provider,
-		client:    &http.Client{Timeout: 60 * time.Second},
+		client:    client,
 		streams:   streamProxy,
 	}
 }

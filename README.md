@@ -344,7 +344,8 @@ docker compose up -d --build
 
 > **mock 节点地址怎么填（跟跑法有关）**
 > - **方式一（Docker 全容器）**：网关在容器里，配置节点地址要填 `host.docker.internal:8091`
->   （`127.0.0.1` 是容器自己，够不到宿主机上的 mock）；admin 需开 `ALLOW_PRIVATE_UPSTREAM=1`（compose 里已配）。
+>   （`127.0.0.1` 是容器自己，够不到宿主机上的 mock）；admin 与 gateway 都配了
+>   `ALLOW_UPSTREAM_CIDRS=172.16.0.0/12`（compose 里已配），放行 Docker 桥接网段。
 > - **方式二（本地 `go run`）**：网关直接跑在宿主机，节点地址照常填 `127.0.0.1:8091`，不用改。
 
 ### 方式二：本地开发（依赖 Docker 化，程序用 go run）
@@ -405,7 +406,7 @@ curl http://127.0.0.1:18090/                       # 401「缺少 X-API-Key」= 
 ```
 
 > 集群里的节点地址填 Service 名，例如 `http://mock:8091`，不要填 `127.0.0.1`
->（那是 Pod 自己）；admin 已配 `ALLOW_PRIVATE_UPSTREAM=1` 放行集群内地址。
+>（那是 Pod 自己）；admin 与 gateway 已配 `ALLOW_UPSTREAM_CIDRS` 放行集群网段。
 
 > 完整的功能验证步骤（25 项，可直接照做）见 [验证清单.md](<验证清单.md>)。
 
@@ -488,7 +489,7 @@ bombardier -c 500 -d 30s -l http://127.0.0.1:8090/ -H "X-API-Key: <key>"
 ```
 
 > 前置：网关跑在 Docker 里时，mock 的节点地址要指向 `host.docker.internal:8091`
->（`127.0.0.1` 是容器自己，够不到宿主机的 mock），admin 需开 `ALLOW_PRIVATE_UPSTREAM=1`。
+>（`127.0.0.1` 是容器自己，够不到宿主机的 mock），admin 与 gateway 需放行 Docker 桥接网段。
 
 
 ---

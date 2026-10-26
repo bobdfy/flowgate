@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bobdfy/flowgate/internal/model"
+	"github.com/bobdfy/flowgate/internal/netguard"
 )
 
 // parseUpstream 解析上游地址，不带 scheme 时自动补 http://。
@@ -31,17 +32,18 @@ func parseUpstream(addr string) (*url.URL, error) {
 
 // ProxyCache 按"上游地址 + 超时配置"缓存 Tranport，刷新时复用，避免反复新建 Transport。(缓存)
 type ProxyCache struct {
-	mu sync.Mutex
-	m  map[string]*http.Transport
+	mu     sync.Mutex
+	m      map[string]*http.Transport
+	policy *netguard.Policy
 }
 
-// NewProxyCache 创建一个空的 ProxyCache。
-func NewProxyCache() *ProxyCache {
-	return &ProxyCache{m: map[string]*http.Transport{}}
+// NewProxyCache 创建一个空的 ProxyCache。policy 为 nil 时默认拒绝所有内网地址。
+func NewProxyCache(policy *netguard.Policy) *ProxyCache {
+	return &ProxyCache{m: map[string]*http.Transport{}, policy: policy}
 }
 
 // 构建带超时的Tranport
-func newTransport(svc model.Service) *http.Transport {
+func newTransport(svc model.Service, policy *netguard.Policy) *http.Transport {
 	connect := time.Duration(svc.ConnectTimeoutMs) * time.Millisecond
 	if connect <= 0 {
 		connect = 3 * time.Second
@@ -57,7 +59,9 @@ func newTransport(svc model.Service) *http.Transport {
 	}
 
 	return &http.Transport{
-		DialContext: (&net.Dialer{Timeout: connect}).DialContext, // 建连超时(TCP 三次握手)
+		// 建连超时(TCP 三次握手)；DialControl 在解析之后、连接之前校验目标 IP，
+		// 配置期的 DNS 检查被绕过（DNS rebinding）时由这里兜底。
+		DialContext: policy.Dialer(connect).DialContext,
 		// 空闲连接保活
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: time.Duration(svc.ResponseHeaderTimeoutMs) * time.Millisecond,
@@ -76,7 +80,7 @@ func (c *ProxyCache) get(u *url.URL, svc model.Service) *http.Transport {
 	if t, ok := c.m[key]; ok {
 		return t
 	}
-	t := newTransport(svc)
+	t := newTransport(svc, c.policy)
 	c.m[key] = t
 	return t
 }

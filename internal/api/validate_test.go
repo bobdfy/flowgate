@@ -15,10 +15,10 @@ import (
 // 这批用例本质上是回归测试：每一条都对着一个已经修掉的真实缺陷。
 
 func TestValidateNodeForWrite(t *testing.T) {
-	// 地址合法性里有很多选项依赖 DNS（isPrivateHost 会 LookupIP），
-	// 为了让这条用例在任何网络环境下都稳定，先关掉内网拦截。
+	// 这条用例只关心「地址形状」，所以把整个 IP 空间放进白名单。
 	// 内网拦截本身由下面的 TestValidateNodeAddress_Private 单独覆盖。
-	t.Setenv("ALLOW_PRIVATE_UPSTREAM", "1")
+	// 地址一律用 IP 字面量：域名要真解析，会让用例依赖网络环境。
+	t.Setenv("ALLOW_UPSTREAM_CIDRS", "0.0.0.0/0,::/0")
 
 	tests := []struct {
 		name    string
@@ -26,8 +26,8 @@ func TestValidateNodeForWrite(t *testing.T) {
 		wantErr bool
 		hint    string
 	}{
-		{"正常 http 地址", model.Node{Address: "http://upstream:8080", Weight: 1}, false, ""},
-		{"正常 https 地址", model.Node{Address: "https://api.example.com", Weight: 1}, false, ""},
+		{"正常 http 地址", model.Node{Address: "http://127.0.0.1:8080", Weight: 1}, false, ""},
+		{"正常 https 地址", model.Node{Address: "https://8.8.8.8", Weight: 1}, false, ""},
 		{"地址为空会被拒", model.Node{Address: "", Weight: 1}, true, "PUT 不带 body 时零值不能静默入库"},
 		{"缺少 host 会被拒", model.Node{Address: "http://", Weight: 1}, true, ""},
 		{"相对路径会被拒", model.Node{Address: "upstream:8080", Weight: 1}, true, "没有 scheme"},
@@ -53,7 +53,7 @@ func TestValidateNodeForWrite(t *testing.T) {
 // weight=0 的节点在加权轮询里永远选不中，但 admin 上看起来一切正常（enabled=true）。
 // 与其让用户排查"为什么这条节点没有流量"，不如在写路径直接归一化成 1。
 func TestValidateNodeForWrite_WeightFallback(t *testing.T) {
-	t.Setenv("ALLOW_PRIVATE_UPSTREAM", "1")
+	t.Setenv("ALLOW_UPSTREAM_CIDRS", "127.0.0.0/8")
 
 	cases := []struct {
 		in   int
@@ -65,7 +65,7 @@ func TestValidateNodeForWrite_WeightFallback(t *testing.T) {
 		{10, 10}, // 正常值保持不动
 	}
 	for _, c := range cases {
-		n := model.Node{Address: "http://upstream:8080", Weight: c.in}
+		n := model.Node{Address: "http://127.0.0.1:8080", Weight: c.in}
 		if err := validateNodeForWrite(&n); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -78,8 +78,8 @@ func TestValidateNodeForWrite_WeightFallback(t *testing.T) {
 // TestValidateNodeAddress_Private 覆盖 SSRF 防护本身。
 // ★ 关键点：这条规则 Create 和 Update 必须都生效 —— Update 漏校验曾经是可以绕过的。
 func TestValidateNodeAddress_Private(t *testing.T) {
-	// 显式关掉开关，保证走的是「拦截」分支
-	t.Setenv("ALLOW_PRIVATE_UPSTREAM", "0")
+	// 白名单为空 = 拦截所有内网地址（生产默认）
+	t.Setenv("ALLOW_UPSTREAM_CIDRS", "")
 
 	privateAddrs := []string{
 		"http://127.0.0.1:8080",        // 回环
@@ -97,10 +97,18 @@ func TestValidateNodeAddress_Private(t *testing.T) {
 		}
 	}
 
-	// 开关打开时本机的 mock 上游必须能配上，否则本地联调没法做
-	t.Setenv("ALLOW_PRIVATE_UPSTREAM", "1")
+	// 显式白名单内的地址必须能配上，否则本地联调没法做。
+	// 这里同时覆盖了 ::1 和 127.0.0.1：localhost 在双栈机器上会解析出两个地址，
+	// 只放行其中一个依然会被拒——校验是「全部解析结果都允许才通过」。
+	t.Setenv("ALLOW_UPSTREAM_CIDRS", "127.0.0.0/8,::1/128")
 	if err := validateNodeAddress("http://localhost:8091"); err != nil {
-		t.Errorf("ALLOW_PRIVATE_UPSTREAM=1 时应当放行本地地址，但报错：%v", err)
+		t.Errorf("白名单内的本地地址应当放行，但报错：%v", err)
+	}
+
+	// 白名单写错时必须报错而不是静默放行。
+	t.Setenv("ALLOW_UPSTREAM_CIDRS", "10.0.0.0/33")
+	if err := validateNodeAddress("http://8.8.8.8"); err == nil {
+		t.Error("非法 CIDR 应当让校验失败")
 	}
 }
 

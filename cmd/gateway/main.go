@@ -34,6 +34,16 @@ func main() {
 
 	logSink := gatewayapp.SetupLogging()
 
+	// SSRF 策略：配置期由 admin 校验，这里负责拨号期的最后一道防线。
+	upstreamPolicy, err := cfg.UpstreamPolicy()
+	if err != nil {
+		gatewayapp.Fatal("上游白名单不合法: %v", err)
+	}
+	if allowed := upstreamPolicy.Allowed(); len(allowed) > 0 {
+		slog.Warn("upstream_private_allowed", "cidrs", allowed,
+			"hint", "这些内网地址允许被拨号，生产环境应确认必要性")
+	}
+
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		gatewayapp.Fatal("DATABASE_URL 未设置")
@@ -100,7 +110,7 @@ func main() {
 	defer hcCancel()
 
 	router := gateway.NewRouter()
-	rm := gatewayapp.NewRouteManager(hcCtx, postgres.NewVersionStore(db), router, gateway.NewProxyCache())
+	rm := gatewayapp.NewRouteManager(hcCtx, postgres.NewVersionStore(db), router, gateway.NewProxyCache(upstreamPolicy))
 	if err := rm.Refresh(); err != nil {
 		gatewayapp.Fatal("加载路由失败: %v", err)
 	}
@@ -135,7 +145,7 @@ func main() {
 	aiCtx, aiCancel := context.WithCancel(context.Background())
 	defer aiCancel()
 
-	aiRT := gatewayapp.NewAIRuntime(aiCtx, *aiCfg, tpmLimiter, aiConfigStore, usageStore)
+	aiRT := gatewayapp.NewAIRuntime(aiCtx, *aiCfg, tpmLimiter, aiConfigStore, usageStore, upstreamPolicy)
 	aiRT.Start(aiCtx)
 
 	// 节点健康 + AI 加载结果只在本进程内存里，定期写 Redis 给管理面读取。
