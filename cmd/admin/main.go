@@ -16,6 +16,7 @@ import (
 
 	"github.com/bobdfy/flowgate/internal/adminui"
 	"github.com/bobdfy/flowgate/internal/api"
+	"github.com/bobdfy/flowgate/internal/middleware"
 	"github.com/bobdfy/flowgate/internal/quota"
 	"github.com/bobdfy/flowgate/internal/store/postgres"
 	"github.com/joho/godotenv"
@@ -28,12 +29,27 @@ func main() {
 
 	// 命令行参数：数据库连接串 + 监听地址
 	dsn := flag.String("dsn", "", "数据库连接字符串（默认读 DATABASE_URL）")
+
 	addr := flag.String("addr", "127.0.0.1:8092", "管理服务监听地址（默认仅本机）")
-	adminKey := flag.String("admin-key", "", "管理面静态鉴权 key（空 = 不鉴权，仅限本地开发）")
+
+	adminKey := flag.String("admin-key", os.Getenv("ADMIN_KEY"), "管理面静态鉴权 key（空 = 不鉴权，仅限本地开发）")
+	insecureDev := flag.Bool("insecure-dev", false, "运行管理面在非回环地址无鉴权运行（仅本地开发）")
+
 	redisAddr := flag.String("redis", os.Getenv("REDIS_ADDR"), "Redis 地址（用于 TPM 用量查询；空 = 不启用）")
+
 	tpmWindow := flag.Duration("tpm-window", time.Minute, "TPM 窗口长度兜底值（gateway 尚未发布窗口时使用）")
+
 	webDir := flag.String("web-dir", "", "管理控制台静态文件目录（如 /app/web；空 = 不托管前端）")
 	flag.Parse()
+
+	if *adminKey == "" && !middleware.IsLoopbackAddr(*addr) {
+		if !*insecureDev {
+			log.Fatalf("拒绝启动：管理面监听%s（非回环）但未配置管理凭据。"+
+				"请用 -admin-key 或环境变量 ADMIN_KEY 注入；"+
+				"仅本地开发可显式加 -insecure-dev", *addr)
+		}
+		log.Printf("警告：管理面在%s上无鉴权运行（-insecure-dev）, 任何能访问该端口的人都能配置", *addr)
+	}
 
 	// 未通过 -dsn 指定时，从环境变量读取（与 gateway 一致）
 	if *dsn == "" {

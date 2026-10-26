@@ -43,7 +43,7 @@ services:
     # environment 里的同名字段优先级更高，会覆盖 .env 里的本地地址。
     env_file:
       - ../.env
-    command: ["-ai-config", "/etc/flowgate/ai.yaml"]
+    command: ["-ai-config", "/etc/flowgate/ai.yaml", "-metrics-addr", "0.0.0.0:9090"]
     volumes:
       # 首次启动用 ai.yaml 给 DB 做种子；之后 DB 是配置事实来源。
       - ../ai.yaml:/etc/flowgate/ai.yaml:ro
@@ -53,7 +53,7 @@ services:
       REDIS_PASSWORD: flowgate
     ports:
       - "8090:8090"
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -64,6 +64,9 @@ services:
       args:
         BIN: admin
     container_name: flowgate-admin
+    env_file: 
+      - ../.env
+
     # admin 顺带托管控制台静态文件（web/dist），页面与 API 同源，不需要 nginx。
     # 构建前端：cd ../web && pnpm build
     command: ["-addr", ":8092", "-web-dir", "/app/web"]
@@ -76,7 +79,7 @@ services:
     volumes:
       - ../web/dist:/app/web:ro
     ports:
-      - "8092:8092"
+      - "127.0.0.1:8092:8092"
     depends_on:
       postgres: { condition:  service_healthy }
       redis: { condition: service_healthy }
