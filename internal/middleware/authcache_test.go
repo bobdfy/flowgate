@@ -63,6 +63,23 @@ func TestAuthCacheDisabled(t *testing.T) {
 	}
 }
 
+// TestAuthCacheClear 验证 clear 会同时清掉正缓存和负缓存。
+// 鉴权配置版本号变化时靠它让 allowed_models / 限额改动立即生效。
+func TestAuthCacheClear(t *testing.T) {
+	c := newAuthCache(time.Minute)
+	c.put("positive", &model.APIKey{ID: 1})
+	c.put("negative", nil)
+
+	c.clear()
+
+	if _, hit := c.get("positive"); hit {
+		t.Fatal("clear 后正缓存不应命中")
+	}
+	if _, hit := c.get("negative"); hit {
+		t.Fatal("clear 后负缓存不应命中")
+	}
+}
+
 // TestAuthCacheOverwrite 验证同一 hash 重复 put 会覆盖旧值。
 func TestAuthCacheOverwrite(t *testing.T) {
 	c := newAuthCache(time.Minute)

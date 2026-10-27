@@ -93,6 +93,7 @@ func RateLimit(limiter ratelimit.Limiter, keyFn KeyFunc, next http.Handler, resp
 			// 返回 429 状态码和消息体
 			// 只写 scope 字面量，不写具体 key —— 避免高基数（与 metrics.go 注释一致）
 			observability.RateLimitedTotal.WithLabelValues("key").Inc()
+			SetRouteLabel(r, LabelRateLimited)
 			if responder != nil {
 				responder(w, r, http.StatusTooManyRequests, "Too Many Requests")
 				return
@@ -151,6 +152,7 @@ func RateLimitPair(limiter PairLimiter, keyFn PairKeyFunc, next http.Handler, re
 			)
 			// 只写 scope 字面量，不写具体 key —— 避免高基数（与 metrics.go 注释一致）
 			observability.RateLimitedTotal.WithLabelValues(scope).Inc()
+			SetRouteLabel(r, LabelRateLimited)
 			if responder != nil {
 				responder(w, r, http.StatusTooManyRequests, "Too Many Requests")
 				return

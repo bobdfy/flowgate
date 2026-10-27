@@ -34,18 +34,34 @@ services:
       retries: 10
       
   gateway:
-    build: 
+    build:
       context: ..
       args:
         BIN: gateway
     container_name: flowgate-gateway
+    # 上游 key（DEEPSEEK_API_KEY / ZHIPU_API_KEY 等）从根目录 .env 注入；
+    # environment 里的同名字段优先级更高，会覆盖 .env 里的本地地址。
+    env_file:
+      - ../.env
+    command: ["-ai-config", "/etc/flowgate/ai.yaml", "-metrics-addr", "0.0.0.0:9090"]
+    volumes:
+      # 首次启动用 ai.yaml 给 DB 做种子；之后 DB 是配置事实来源。
+      - ../ai.yaml:/etc/flowgate/ai.yaml:ro
     environment:
       DATABASE_URL: postgres://flowgate:flowgate@postgres:5432/flowgate
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: flowgate
+      # 拨号期 SSRF 白名单（空=禁止所有内网地址）。
+      # 容器里要访问的「内网」有两类：
+      #   - host.docker.internal → Docker 桥接网段（172.16.0.0/12）
+      #   - 宿主机上的 mockai（8095）、ollama 等，同样走 host.docker.internal
+      # 生产环境按实际部署网段收窄，不要直接照抄。
+      #   - Docker Desktop 的 host.docker.internal 在这里解析到 192.168.65.254，
+      #     所以要把 192.168.65.0/24 也放进来，否则会被 SSRF 防护挡掉。
+      ALLOW_UPSTREAM_CIDRS: "172.16.0.0/12,192.168.65.0/24"
     ports:
       - "8090:8090"
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -56,14 +72,26 @@ services:
       args:
         BIN: admin
     container_name: flowgate-admin
-    command: ["-addr", ":8092"]
+    env_file: 
+      - ../.env
+
+    # admin 顺带托管控制台静态文件（web/dist），页面与 API 同源，不需要 nginx。
+    # 构建前端：cd ../web && pnpm build
+    command: ["-addr", ":8092", "-web-dir", "/app/web"]
     environment:
       DATABASE_URL: postgres://flowgate:flowgate@postgres:5432/flowgate
-      ALLOW_PRIVATE_UPSTREAM: "1"
-    ports: 
-      - "8092:8092"
+      # 配置期 SSRF 白名单，与 gateway 的 -allow-upstream-cidrs 同一套规则。
+      ALLOW_UPSTREAM_CIDRS: "172.16.0.0/12,127.0.0.1/32"
+      # 只用于查询租户当窗 TPM 用量；不配也能启动，接口返回 503。
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: flowgate
+    volumes:
+      - ../web/dist:/app/web:ro
+    ports:
+      - "127.0.0.1:8092:8092"
     depends_on:
       postgres: { condition:  service_healthy }
+      redis: { condition: service_healthy }
 volumes:
   postgres_data:
   redis_data:

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"math"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bobdfy/flowgate/internal/loadbalance"
+	"github.com/bobdfy/flowgate/internal/middleware"
 	"github.com/bobdfy/flowgate/internal/model"
 	"github.com/bobdfy/flowgate/internal/observability"
 	"github.com/bobdfy/flowgate/internal/overload"
@@ -31,19 +31,22 @@ type Backend struct {
 	// 挑中实例后，去哪拿转发用的 proxy (转发器缓存)
 	proxyCache *ProxyCache
 
-	pool *loadbalance.NodePool
-
 	guard *overload.Guard
 }
 
 const (
 	// backoffMax 退避封顶，重试间隔最长不超过这个值。
 	backoffMax = time.Second
+
+	// maxProxyRequestBody 普通转发路径的请求体上限
+	maxProxyRequestBody = 32 << 20 // 32MiB
 )
 
 // ServeHTTP 实现 http.Handler：挑一个健康实例转发，失败按配置重试（换节点 + 退避），最后把「最终那次」的响应（或错误）一次性 flush 给客户端。
 func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	start := time.Now()
+
+	origCtx := req.Context()
 
 	// 整体超时：整个「重试过程」共享同一个 deadline(RoundTrip 和退避都受它约束)
 	if timeout := time.Duration(b.svc.RequestTimeoutMs) * time.Millisecond; timeout > 0 {
@@ -53,25 +56,28 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var (
-		resp *http.Response
-		err  error
-		node *loadbalance.NodeState
+		resp  *http.Response
+		err   error
+		node  *loadbalance.NodeState
+		lease *loadbalance.Lease
 	)
 
+	defer func() {
+		if lease != nil {
+			lease.Done(loadbalance.OutcomeFailure)
+		}
+	}()
+
 	// 服务级并发护栏（过载保护），位置在超时(之后)。
-	//
-	// 为什么不能放在超时之前：那样"排队等待"的时间不计入 request_timeout。
-	// 举例：request_timeout = 10s、排队等了 20s —— 位置在超时之前的话，
-	// 出队后才开始算那 10s，客户端实际等了 30s，跟承诺的 10s 对不上。
 	// 放在之后，排队 + 重试 + 转发 全程共享同一个 deadline，
-	// 这也正是 wait 策略能成立的前提。
 	release, err := b.guard.Acquire(req.Context())
 	if err != nil {
-		if rejectOverload(w, err, "service", b.svc.Name, func(reason string) {
+		if middleware.WriteOverload(w, err, b.svc.Name, func(reason string) {
 			observability.OverloadRejectedTotal.WithLabelValues(b.svc.Name, reason).Inc()
 		}) {
 			return
 		}
+		return
 	}
 
 	defer release()
@@ -84,9 +90,16 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// 所以先整读进内存，每轮重试前重新包 reader 发出去。
 	var reqBody []byte
 	if req.Body != nil {
+		req.Body = http.MaxBytesReader(w, req.Body, maxProxyRequestBody)
 		reqBody, err = io.ReadAll(req.Body)
 		req.Body.Close()
 		if err != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				w.Header().Set("Connection", "close")
+				http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
@@ -94,10 +107,11 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	attempt := 0
 	for ; ; attempt++ {
-		node = b.lb.Pick()
-		if node == nil {
+		lease = b.lb.Pick()
+		if lease == nil {
 			break
 		}
+		node = lease.Node()
 
 		u, perr := parseUpstream(node.Address)
 		if perr != nil {
@@ -129,7 +143,8 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 
 		// 记一次失败给被动健康 + 熔断器
-		b.pool.RecordResult(node, false)
+		b.settle(lease, origCtx, err, statusCode)
+		lease = nil
 
 		slept, delay := sleepBackoff(req.Context(), b.svc.RetryBackoffMs, attempt)
 		slog.Warn("retry",
@@ -157,7 +172,9 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if err != nil {
-		b.pool.RecordResult(node, false)
+		if lease != nil {
+			b.settle(lease, origCtx, err, 0)
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
 		} else {
@@ -173,7 +190,9 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// 成功路径：最终状态码记被动健康（成功只记成功，不误记失败）
-	b.pool.RecordResult(node, resp.StatusCode < 500)
+	b.settle(lease, origCtx, nil, resp.StatusCode)
+	lease = nil
+
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
@@ -268,33 +287,34 @@ func (b *Backend) ReportMetrics() {
 	observability.QueueDepth.WithLabelValues(b.svc.Name).Set(float64(st.Queued))
 }
 
-// rejectOverload 把 overload.RejectedError 翻译为HTTP响应
-func rejectOverload(w http.ResponseWriter, err error, role, name string, inc func(reason string)) bool {
-	var rej *overload.RejectedError
-	if !errors.As(err, &rej) {
-		// C2：排队等待超时（ctx 到点）要回 504，不能隐式回 200 空 body。
-		if errors.Is(err, context.DeadlineExceeded) {
-			http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
-			return true
+// classifyOutcome 判断这次失败记录在谁身上
+func classifyOutcome(origCtx context.Context, err error, status int) (loadbalance.Outcome, string) {
+	if err == nil {
+		if status >= 500 {
+			return loadbalance.OutcomeFailure, "status"
 		}
-		// context.Canceled：客户端已断开，无需回写。
-		slog.Debug("guard_ctx_done", "role", role, "name", name, "err", err)
-		return true
+		return loadbalance.OutcomeSuccess, ""
 	}
 
-	if rej.RetryAfter > 0 {
-		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(rej.RetryAfter.Seconds()))))
+	switch origCtx.Err() {
+	case context.Canceled, context.DeadlineExceeded:
+		return loadbalance.OutcomeNeutral, ""
 	}
 
-	if inc != nil {
-		inc(string(rej.Reason))
+	if errors.Is(err, context.DeadlineExceeded) {
+		return loadbalance.OutcomeFailure, "timeout"
 	}
-	slog.Warn("overloaded",
-		"role", role,
-		"name", name,
-		"reason", rej.Reason,
-		"inflight", rej.InFlight)
+	return loadbalance.OutcomeFailure, "error"
+}
 
-	http.Error(w, "overload:"+string(rej.Reason), http.StatusServiceUnavailable)
-	return true
+// settle 结算一次转发: 记指标 + 归还名额，返回路径都必须走这里
+func (b *Backend) settle(lease *loadbalance.Lease, origCtx context.Context, err error, status int) {
+	outcome, reason := classifyOutcome(origCtx, err, status)
+	switch outcome {
+	case loadbalance.OutcomeFailure:
+		observability.UpstreamFailuresTotal.WithLabelValues(b.svc.Name, reason).Inc()
+	case loadbalance.OutcomeNeutral:
+		observability.ClientCancelTotal.WithLabelValues(b.svc.Name).Inc()
+	}
+	lease.Done(outcome)
 }

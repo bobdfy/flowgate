@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"log"
-	"net"
 	"net/http"
 	"strconv"
 
@@ -114,20 +113,4 @@ func (h *Handler) DeleteNode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// isPrivateHost 判断 host 是否解析到内网 / 回环 / 链路本地地址（SSRF 防护）。
-// 解析失败按私有处理：宁可拒绝，不放过可疑地址。
-func isPrivateHost(host string) bool {
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return true
-	}
-	for _, ip := range ips {
-		if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
-			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			return true
-		}
-	}
-	return false
 }

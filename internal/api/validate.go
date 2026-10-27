@@ -1,11 +1,12 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/url"
-	"os"
 
 	"github.com/bobdfy/flowgate/internal/model"
+	"github.com/bobdfy/flowgate/internal/netguard"
 )
 
 // 本文件集中放置「写操作」的入参校验与默认值填充。
@@ -46,13 +47,19 @@ func validateNodeAddress(addr string) error {
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return fmt.Errorf("address must be a full URL, e.g. http://localhost:8091")
 	}
-	// 只允许 http/https，并拦内网/回环地址，防止 SSRF
-	// （本地联调可用 ALLOW_PRIVATE_UPSTREAM=1 放开）。
+	// 只允许 http/https，并拦内网/回环地址，防止 SSRF。
+	// 放行范围由 ALLOW_UPSTREAM_CIDRS 显式指定（逗号分隔的 CIDR），
+	// 不再用「一个开关放开整类地址」——白名单是可审计的，开关不是。
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("address scheme must be http or https")
 	}
-	if os.Getenv("ALLOW_PRIVATE_UPSTREAM") != "1" && isPrivateHost(u.Hostname()) {
-		return fmt.Errorf("address points to a private/loopback host")
+	policy, err := netguard.FromEnv("ALLOW_UPSTREAM_CIDRS")
+	if err != nil {
+		// 配置写错时宁可全部拒绝，也不静默放行。
+		return fmt.Errorf("ALLOW_UPSTREAM_CIDRS 配置错误: %w", err)
+	}
+	if err := policy.CheckHost(context.Background(), u.Hostname()); err != nil {
+		return fmt.Errorf("address points to a private/loopback host: %w", err)
 	}
 	return nil
 }
@@ -75,6 +82,9 @@ func validateTenantForWrite(t *model.Tenant) error {
 	}
 	if t.QPSLimit <= 0 {
 		t.QPSLimit = 100
+	}
+	if t.TPMLimit <= 0 {
+		t.TPMLimit = 100000
 	}
 	return nil
 }

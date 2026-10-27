@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bobdfy/flowgate/internal/loadbalance"
+	"github.com/bobdfy/flowgate/internal/middleware"
 	"github.com/bobdfy/flowgate/internal/model"
 	"github.com/bobdfy/flowgate/internal/observability"
 	"github.com/bobdfy/flowgate/internal/overload"
@@ -59,6 +60,7 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 		}
 
 		nodeSpecs[node.ServiceID] = append(nodeSpecs[node.ServiceID], loadbalance.NodeSpec{
+			ID:      node.ID,
 			Address: node.Address,
 			Weight:  node.Weight,
 		})
@@ -104,7 +106,7 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 			pool.SetCBConfig(svc.CBFailureThreshold, svc.CBCooldownMs, svc.CBHalfOpenLimit)
 
 			lb := loadbalance.NewRoundRobin(pool)
-			backend = &Backend{svc: svc, lb: lb, pool: pool, proxyCache: cache,
+			backend = &Backend{svc: svc, lb: lb, proxyCache: cache,
 				guard: overload.NewGuard(svc.MaxConcurrency,
 					overload.Strategy(svc.OverloadStrategy),
 					time.Duration(svc.QueueTimeoutMs)*time.Millisecond,
@@ -169,14 +171,19 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if best == nil {
+		middleware.SetRouteLabel(req, middleware.LabelUnmatched)
 		http.NotFound(w, req)
 		return
 	}
 
+	// 指标标签用路由模板（配置里定义的 pattern），不用原始路径：
+	// 路由数量有界，标签基数才有界。同服务同路径参数也天然归一。
+	middleware.SetRouteLabel(req, best.pattern)
+
 	// 两层护栏的获取顺序是硬约束：路由级先（外），服务级后（内）
 	release, err := best.guard.Acquire(req.Context())
 	if err != nil {
-		rejectOverload(w, err, "route", best.pattern, func(reason string) {
+		middleware.WriteOverload(w, err, best.pattern, func(reason string) {
 			observability.BulkheadRejectedTotal.WithLabelValues(best.pattern, reason).Inc()
 		})
 		return

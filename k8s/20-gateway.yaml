@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  labels:
+    app: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+        - name: gateway
+          image: flowgate-gateway:latest
+          imagePullPolicy: IfNotPresent
+          args: ["-ai=false"]
+          ports:
+            - name: http
+              containerPort: 8090
+            - name: metrics
+              containerPort: 9090
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: flowgate-secret
+                  key: DATABASE_URL
+            - name: REDIS_ADDR
+              value: redis:6379
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: flowgate-secret
+                  key: REDIS_PASSWORD
+            # 拨号期 SSRF 白名单：集群内上游是私有地址，不放行会被直接拒绝连。
+            - name: ALLOW_UPSTREAM_CIDRS
+              value: "10.42.0.0/16,10.43.0.0/16"
+          readinessProbe:
+            tcpSocket:
+              port: 8090
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8090
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+spec:
+  selector:
+    app: gateway
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+    - name: metrics
+      port: 9090
+      targetPort: 9090

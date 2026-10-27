@@ -8,11 +8,25 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bobdfy/flowgate/internal/identity"
+	"github.com/bobdfy/flowgate/internal/model"
+	"github.com/bobdfy/flowgate/internal/netguard"
+	"github.com/bobdfy/flowgate/internal/observability"
+	"github.com/bobdfy/flowgate/internal/quota"
 )
+
+// UsageRecorder 接收每次请求的 token 用量流水。
+// 实现必须是非阻塞的：它跑在请求返回路径上。
+type UsageRecorder interface {
+	Record(model.AIUsage)
+}
 
 // ProviderEntry 一个上游供应商的完整信息: 连接的地址、用哪个 key、
 // 以及负责协议转换的适配器。
@@ -37,6 +51,10 @@ type ProviderEntry struct {
 
 	// UpstreamPath 是上游真实路径；空 = 用 ApiName.Path()（默认行为）。
 	UpstreamPath string
+
+	// StreamUsage 表示上游支持 stream_options.include_usage。
+	// 开启后网关会替没要 usage 的客户端向上游要，结算用真实值，再把 usage 帧吞掉。
+	StreamUsage bool
 }
 
 // Handler 处理 AI 请求（OpenAI 兼容接口）。
@@ -45,17 +63,75 @@ type Handler struct {
 	// 这是模型白名单的唯一实现点。
 	providers map[string]*ProviderEntry
 
-	client *http.Client
+	clients *Clients
 
 	// streams 是流式转发器，可为 nil（退化成缓冲转发）。
 	streams StreamingForwarder
+
+	tpm quota.Limiter
+
+	// usage 可为 nil（不记录用量）。
+	usage UsageRecorder
 }
 
-// NewHandler 创建 AI 处理器。
-func NewHandler(provider map[string]*ProviderEntry) *Handler {
+// Timeout 是 AI 链路的分层超时
+type Timeouts struct {
+	Connect        time.Duration // TCP 建连
+	ResponseHeader time.Duration // 发出请求到收到响应头
+	Buffered       time.Duration // 非流式请求总时长
+	StreamIdle     time.Duration // 流式读空闲： 多久没数据就断
+	StreamMax      time.Duration // 流式总时长上限: 0 = 不限
+}
+
+func DefaultTimeouts() Timeouts {
+	return Timeouts{5 * time.Second, 60 * time.Second, 60 * time.Second, 60 * time.Second, 0}
+}
+
+// Clients 把流式和非流式两种超时语义分开
+type Clients struct {
+	Stream   *http.Client
+	Buffered *http.Client
+	timeouts *Timeouts
+}
+
+// NewClient 构造 AI 链路的 HTTP 客户端。policy 为 nil 时默认拒绝所有内网上游。
+//
+//	客户端要由调用方创建一次并长期复用，不要在每次重建 Handler 时新建
+func NewClients(policy *netguard.Policy, t Timeouts) *Clients {
+	tr := &http.Transport{
+		// 拨号层校验与普通转发共用 netguard，不因为走的是 AI 链路就放宽。
+		DialContext: policy.Dialer(t.Connect).DialContext,
+
+		MaxIdleConnsPerHost: 64,
+
+		// 即使 Transport 被换掉，空闲连接也会在 90s 后自行关闭，不会无限堆积。
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: t.ResponseHeader,
+	}
+
+	noRedirect := func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	return &Clients{
+		// 流式
+		Stream: &http.Client{Transport: tr, CheckRedirect: noRedirect},
+
+		// 非流式
+		Buffered: &http.Client{Timeout: t.Buffered, Transport: tr, CheckRedirect: noRedirect},
+
+		timeouts: &t,
+	}
+}
+
+// NewHandler 创建 AI 处理器。client 由调用方持有并复用（见 NewClient）。
+func NewHandler(provider map[string]*ProviderEntry, clients *Clients) *Handler {
+	if clients == nil {
+		clients = NewClients(nil, DefaultTimeouts()) // 兜底：宁可全拒，也不能变成不校验
+	}
 	return &Handler{
 		providers: provider,
-		client:    &http.Client{Timeout: 60 * time.Second},
+		clients:   clients,
 		streams:   streamProxy,
 	}
 }
@@ -69,9 +145,9 @@ func (h *Handler) SetStreamingForwarder(f StreamingForwarder) {
 }
 
 // SetClient 替换底层 HTTP 客户端（测试用）。
-func (h *Handler) SetClient(c *http.Client) {
+func (h *Handler) SetClient(c *Clients) {
 	if c != nil {
-		h.client = c
+		h.clients = c
 	}
 }
 
@@ -80,6 +156,16 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	for _, rt := range RegisteredRoutes() {
 		mux.Handle(rt.Method+" "+rt.Path, h)
 	}
+}
+
+// SetTPM 注入 Token 级配额限流器。nil 表示不启用 TPM。
+func (h *Handler) SetTPM(l quota.Limiter) {
+	h.tpm = l
+}
+
+// SetUsageRecorder 注入用量记录器。nil 表示不记录。
+func (h *Handler) SetUsageRecorder(r UsageRecorder) {
+	h.usage = r
 }
 
 // ServeHTTP 处理 /v1/* 的 OpenAI 兼容请求。
@@ -93,12 +179,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if apiName == Models {
-		h.serveModels(w)
+		h.serveModels(w, r)
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, ErrTypeInvalidRequest,
+				fmt.Sprintf("请求体超过上限 %d 字节", maxRequestBody))
+			return
+		}
 		writeError(w, http.StatusBadRequest, ErrTypeInvalidRequest,
 			"读取请求体失败: "+err.Error())
 		return
@@ -129,6 +221,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 5.1 Key 级模型白名单：配置了 allowed_models 的 key 只能用列出的模型。
+	if !modelAllowed(r.Context(), req.Model) {
+		slog.Warn("ai_model_forbidden", "model", req.Model, "path", r.URL.Path)
+		writeError(w, http.StatusForbidden, ErrTypePermission,
+			"该 API Key 无权使用模型: "+req.Model)
+		return
+	}
+
+	// 5.2 用量流水：模型解析通过后开始记录，状态码由 statusWriter 捕获。
+	// 这次的 w 会被后面所有写操作共用，flush 通过 Unwrap 仍然能拿到原始 writer。
+	start := time.Now()
+	sw := &statusWriter{ResponseWriter: w}
+	w = sw
+	rec := model.AIUsage{
+		Model:     req.Model,
+		RequestID: r.Header.Get("X-Request-ID"),
+	}
+	if id, ok := identity.FromContext(r.Context()); ok {
+		rec.TenantID, rec.KeyID = id.TenantID, id.KeyID
+	}
+	var streaming bool
+	defer func() {
+		rec.Streaming = streaming
+		rec.DurationMS = int(time.Since(start).Milliseconds())
+		rec.StatusCode = sw.status
+		if rec.StatusCode == 0 {
+			rec.StatusCode = 499 // 客户端断开，没来得及回写
+		}
+		if h.usage != nil {
+			h.usage.Record(rec)
+		}
+	}()
+
 	// 6. 协议转换。先深拷一份客户端请求头交给 provider 改。
 	header := headerToMap(r.Header)
 
@@ -156,8 +281,54 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 8. ★ 单点判定：走 buffered 还是 streaming，只判一次。
-	streaming := isStreamRequest(apiName, body)
+	// 8. 单点判定：走 buffered 还是 streaming，只判一次。
+	streaming = isStreamRequest(apiName, body)
+
+	// 8.1 上游支持时，替没要 usage 的客户端向上游要：
+	// 结算用真实 token，客户端那边再把多出来的 usage 帧吞掉。
+	stripUsage := false
+	if streaming && entry.StreamUsage && !wantsStreamUsage(body) {
+		if injected, ierr := ensureStreamUsage(body); ierr != nil {
+			slog.Warn("ai_stream_usage_inject_failed", "model", req.Model, "err", ierr)
+		} else {
+			body = injected
+			stripUsage = true
+		}
+	}
+
+	// TPM 预扣: 转发前先占额度，避免并发下集体穿透
+	var settler *tpmSettler
+	if h.tpm != nil {
+		if id, ok := identity.FromContext(r.Context()); ok {
+			need := estimateNeed(body)
+			res, d, qerr := h.tpm.Reserve(r.Context(), id.TenantID, need, id.TenantTPM)
+			switch {
+			case errors.Is(qerr, quota.ErrUnavailable):
+				writeError(w, http.StatusServiceUnavailable, ErrTypeGateway, "配额服务暂不可用，请稍后重试")
+				return
+			case qerr != nil:
+				slog.Error("tpm_reserve_failed",
+					"tenant_id", id.TenantID, "model", req.Model, "err", qerr)
+				writeError(w, http.StatusInternalServerError, ErrTypeGateway, "配额校验失败")
+				return
+			case !d.Allowed:
+				retryAfter := int(math.Ceil(d.RetryAfter.Seconds()))
+				if retryAfter > 0 {
+					w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+				}
+				slog.Warn("tpm_limited",
+					"tenant_id", id.TenantID, "model", req.Model,
+					"used", d.Used, "limit", d.Limit, "need", need)
+				writeError(w, http.StatusTooManyRequests, ErrTypeLimit,
+					fmt.Sprintf("本窗口 TPM 配额已用尽：已用 %d / 上限 %d，%d 秒后重置",
+						d.Used, d.Limit, retryAfter))
+				return
+			default:
+				settler = &tpmSettler{ql: h.tpm, res: res, base: r.Context()}
+				defer settler.Settle(0)
+			}
+		}
+	}
 
 	// 9. 发上游请求。
 	resp, err := h.forward(r, entry, apiName, header, body, streaming)
@@ -179,20 +350,44 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 10~11. 输出。
 	if streaming {
-		h.serveStream(w, r, resp, req.Model)
+		h.serveStream(w, r, resp, req.Model, body, settler, stripUsage, &rec)
 		return
 	}
-	h.serveBuffered(w, resp, req.Model)
+	u := h.serveBuffered(w, resp, req.Model)
+	rec.PromptTokens = int64(u.PromptTokens)
+	rec.CompletionTokens = int64(u.CompletionTokens)
+	rec.TotalTokens = int64(u.TotalTokens)
+	if settler != nil {
+		settler.Settle(int64(u.TotalTokens))
+	}
+
+}
+
+// modelAllowed 判断当前请求的 API Key 是否有权使用该模型。
+// 没有身份（理论上不会发生）或白名单为空 → 不限制。
+func modelAllowed(ctx context.Context, model string) bool {
+	id, ok := identity.FromContext(ctx)
+	if !ok || len(id.AllowedModels) == 0 {
+		return true
+	}
+	for _, m := range id.AllowedModels {
+		if m == model {
+			return true
+		}
+	}
+	return false
 }
 
 // serveModels 处理 GET /v1/models。
-// TODO(阶段三)：改用 ModelRegistry —— 只暴露"已配置且启用"的模型，
-// 不把上游的全部模型名泄露给客户端。
-func (h *Handler) serveModels(w http.ResponseWriter) {
+// 不把上游的全部模型名泄露给客户端；配置了 allowed_models 的 key 只看到自己的模型。
+func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 	list := ModelList{Object: "list", Data: make([]ModelInfo, 0, len(h.providers))}
 	// C9：map 遍历顺序不稳定，先排序再构造，保证 /v1/models 返回稳定（也避免 golden 测试 flaky）。
 	names := make([]string, 0, len(h.providers))
 	for name := range h.providers {
+		if !modelAllowed(r.Context(), name) {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -208,66 +403,99 @@ func (h *Handler) serveModels(w http.ResponseWriter) {
 }
 
 // serveBuffered 处理非流式响应：整读上游 body → 透传给客户端。
-//
-// 上游报错时原样透传它的状态码和错误体 —— 不要伪装成成功，
-// 也不要自己改成 502。401 = 上游 key 配错了，429 = 被上游限流，
+// 401 = 上游 key 配错了，429 = 被上游限流，
 // 这两种和"网关自己 502"是完全不同的问题，混掉之后排障要多花几小时。
-func (h *Handler) serveBuffered(w http.ResponseWriter, resp *http.Response, model string) {
+func (h *Handler) serveBuffered(w http.ResponseWriter, resp *http.Response, model string) Usage {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		slog.Error("ai_read_upstream_failed", "model", model, "err", err)
 		writeError(w, http.StatusBadGateway, ErrTypeUpstream,
 			"读取上游响应失败: "+err.Error())
-		return
+		return Usage{}
 	}
 	if resp.StatusCode >= 400 {
+		copySafeHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(respBody)
+		return Usage{}
+	}
+
+	copySafeHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(respBody)
+
+	// 解析 usage 用于 TPM 结算和用量流水；解析失败不影响响应（已经写出去了）。
+	var cr ChatResponse
+	if err := json.Unmarshal(respBody, &cr); err != nil {
+		return Usage{}
+	}
+	return cr.Usage
+}
+
+// serveStream 处理流式响应：交给注入的 SSE 转发器。
+// rec 不为 nil 时，把流式统计写回去（prompt/completion 可能是估算值）。
+func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, body []byte, settler *tpmSettler, stripUsage bool, rec *model.AIUsage) {
+	if h.streams == nil {
+		slog.Warn("ai_stream_forwarder_missing", "model", model)
+		u := h.serveBuffered(w, resp, model)
+		if rec != nil {
+			rec.PromptTokens = int64(u.PromptTokens)
+			rec.CompletionTokens = int64(u.CompletionTokens)
+			rec.TotalTokens = int64(u.TotalTokens)
+		}
+		if settler != nil {
+			settler.Settle(int64(u.TotalTokens))
+		}
+		return
+	}
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
 		copySafeHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(respBody)
 		return
 	}
 
-	copySafeHeaders(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(respBody)
-}
-
-// serveStream 处理流式响应：交给注入的 SSE 转发器。
-//
-// 三个必须处理的边界：
-//
-//  1. h.streams == nil —— 没注入转发器时退化成 serveBuffered，不要 panic
-//  2. resp.StatusCode >= 400 —— 上游报错时返回的是 JSON 不是 SSE。
-//     硬按 SSE 分帧会把整个 JSON 当成"没有分隔符的残留"，
-//     最后 flush 出一个畸形事件，客户端解析器直接挂掉，真实错误信息全丢
-//  3. 顺序：先 prepareStreamHeaders（含删 Content-Length）→ WriteHeader →
-//     再开始转发。顺序反了头就不生效
-func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http.Response, model string) {
-	if h.streams == nil {
-		slog.Warn("ai_stream_forwarder_missing", "model", model)
-		h.serveBuffered(w, resp, model)
-		return
-	}
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		copySafeHeaders(w.Header(), resp.Header)
-		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(body)
-		return
-	}
-
 	prepareStreamHeaders(w, resp)
 	w.WriteHeader(http.StatusOK)
 
-	// sink 目前恒为 nil。
-	//
-	// 它原本是给用量统计用的钩子（逐事件抽 usage 交给 Meter）。
-	// 现在不做计费，所以留 nil；以后要做的话在这里赋值即可。
-	var sink StreamEventSink
+	usage := newStreamUsage(body, stripUsage)
 
-	if err := h.streams(w, r, resp.Body, sink, model); err != nil {
-		// 响应头可能已经发出去了，只能记日志。
-		slog.Warn("ai_stream_failed", "model", model, "err", err)
+	if err := h.streams(w, r, resp.Body, usage.sink(), model); err != nil {
+		reason := "upstream_error"
+		if b, ok := resp.Body.(*streamBody); ok {
+			switch {
+			case b.idleHit.Load():
+				reason = "idle_timeout" // 上游不说话
+			case r.Context().Err() != nil:
+				reason = "client_cancel" // 用户自己走了
+			case errors.Is(err, context.DeadlineExceeded):
+				reason = "max_duration" // 说太久了
+			}
+		}
+		observability.AIStreamTerminatedTotal.WithLabelValues(reason).Inc()
+		slog.Warn("ai_stream_failed", "model", model, "reason", reason, "err", err)
+	} else {
+		observability.AIStreamTerminatedTotal.WithLabelValues("normal").Inc()
+	}
+	if settler != nil {
+		settler.Settle(usage.actual())
+	}
+	if rec != nil {
+		rec.PromptTokens = usage.prompt()
+		rec.CompletionTokens = usage.completion()
+		rec.TotalTokens = usage.actual()
+		rec.Estimated = !usage.seen
+	}
+	if usage.seen {
+		slog.Info("tpm_stream_usage",
+			"model", model,
+			"actual", usage.total,
+			"estimated", usage.estimated(),
+			"prompt_est", usage.promptTokens,
+			"completion_est", usage.completionBytes/4,
+			"ratio", float64(usage.estimated())/float64(usage.total))
 	}
 }
 
@@ -281,7 +509,23 @@ func (h *Handler) forward(r *http.Request, entry *ProviderEntry, apiName ApiName
 
 	url := joinURL(entry.BaseURL, path)
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, url, bytes.NewReader(body))
+	ctx := r.Context()
+	var cancels []context.CancelFunc
+	if streaming {
+		// 流式必须始终有一个可取消的 ctx：读空闲计时器要靠它把阻塞的 Read 打断，
+		// 不能只在配了总时长上限时才建 —— 否则 StreamMax=0（默认）时空闲超时是哑的。
+		var cancelIdle context.CancelFunc
+		ctx, cancelIdle = context.WithCancel(ctx)
+		cancels = append(cancels, cancelIdle)
+
+		if h.clients.timeouts.StreamMax > 0 {
+			var cancelMax context.CancelFunc
+			ctx, cancelMax = context.WithTimeout(ctx, h.clients.timeouts.StreamMax)
+			cancels = append(cancels, cancelMax)
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, r.Method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +559,27 @@ func (h *Handler) forward(r *http.Request, entry *ProviderEntry, apiName ApiName
 		req.Header.Set("Accept", "application/json")
 	}
 
-	return h.client.Do(req)
+	c := h.clients.Buffered
+	if streaming {
+		c = h.clients.Stream
+	}
+
+	resp, err := c.Do(req)
+	if err != nil {
+		for _, f := range cancels {
+			f()
+		} // Do 失败时没人会 Close，这里兜住
+		return nil, err
+	}
+	if streaming {
+		resp.Body = newStreamBody(resp.Body, h.clients.timeouts.StreamIdle, func() {
+			for _, f := range cancels {
+				f()
+			}
+		})
+	}
+	return resp, nil
+
 }
 
 // parseChatRequest 解析 Chat Completions 请求体。
@@ -458,6 +722,29 @@ func writeError(w http.ResponseWriter, status int, errType, msg string) {
 		Type:    errType,
 	}})
 }
+
+// statusWriter 只做一件事：记住最终写出的状态码，供用量流水使用。
+// 实现 Unwrap，http.NewResponseController 才能继续拿到 Flush 等能力。
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // maxRequestBody 是请求体上限（16 MiB）。
 const maxRequestBody = 16 << 20

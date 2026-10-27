@@ -10,7 +10,10 @@ var (
 			Help:    "请求处理耗时（秒）",
 			Buckets: prometheus.DefBuckets, // 默认分桶
 		},
-		[]string{"method", "path", "status"}, // 标签
+		// route 是「路由模板」（配置里的 path_pattern）或固定枚举值
+		// （unmatched / auth_rejected / rate_limited / ai/chat ...），不是原始 URL：
+		// 原始路径由客户端控制，直接当标签会造出无界的时间序列。
+		[]string{"method", "route", "status"},
 	)
 
 	// 请求总数（Counter：只增不减）
@@ -19,7 +22,7 @@ var (
 			Name: "flowgate_requests_total",
 			Help: "请求总数",
 		},
-		[]string{"method", "path", "status"},
+		[]string{"method", "route", "status"},
 	)
 
 	// 限流拒绝数（Counter）
@@ -123,6 +126,27 @@ var (
 		[]string{"route"},
 	)
 
+	//  日志队列（logsink）
+	//
+	// 日志改为「单 goroutine + 有界队列」之后，队列满会丢日志。
+	// 这两个指标让“丢了多少、当前积压多少”可见，而不是静默丢失。
+
+	// 被丢弃的日志条数（队列满 / sink 已关闭 / 下游写失败）
+	LogDroppedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "flowgate_log_dropped_total",
+			Help: "被丢弃的日志条数（队列满、sink 已关闭或下游写失败）",
+		},
+	)
+
+	// 日志队列当前积压条数
+	LogQueueDepth = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "flowgate_log_queue_depth",
+			Help: "日志队列当前积压条数",
+		},
+	)
+
 	// ===================== PostgreSQL 连接池（pgxpool）观测 =====================
 	//
 	// 为什么要有这组指标：为了定位「同一进程连续压测，QPS 逐轮劣化、重启即恢复」。
@@ -190,7 +214,7 @@ var (
 		},
 	)
 
-	// ★ 关键指标：取连接时池已空、需要等待别人释放或新建连接的累计次数。
+	// 关键指标：取连接时池已空、需要等待别人释放或新建连接的累计次数。
 	// 稳态下应当恒为 0；它开始增长 = 连接池成了瓶颈。
 	PGPoolEmptyAcquiresTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
@@ -246,6 +270,67 @@ var (
 			Help: "因连接池为空而等待的累计耗时（秒）",
 		},
 	)
+
+	UpstreamFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowgate_upstream_failures_total",
+			Help: "记在节点头上的失败次数（客户端取消不计入）",
+		},
+		[]string{"service", "reason"},
+	)
+
+	// 客户端主动取消或自身超时
+	ClientCancelTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowgate_client_cancel_total",
+			Help: "客户端主动取消或因自身超时中断的请求数",
+		},
+		[]string{"service"},
+	)
+
+	// TPM 配额在 Redis 故障下按降级策略处理的次数
+	TPMDegradedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flowgate_tpm_degraded_total",
+			Help: "TPM 配额在 Redis 故障时按降级策略处理的次数",
+		},
+		[]string{"mode"},
+	)
+
+	InstanceInflight = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "flowgate_instance_inflight_requests",
+		Help: "实例级在途请求数（入口护栏）",
+	})
+
+	// 鉴权缓存
+	AuthCacheEntries = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "flowgate_auth_cache_entries",
+		Help: "鉴权缓存当前条目数（正缓存 + 负缓存）",
+	})
+	AuthCacheHitsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "flowgate_auth_cache_hits_total",
+		Help: "鉴权缓存命中次数",
+	})
+	AuthCacheMissesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "flowgate_auth_cache_misses_total",
+		Help: "鉴权缓存未命中次数（含过期）",
+	})
+	AuthCacheEvictionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "flowgate_auth_cache_evictions_total",
+		Help: "因容量上限被淘汰的条目数",
+	})
+	AuthDBSearchesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "flowgate_auth_db_searches_total",
+		Help: "鉴权回源数据库的查询次数",
+	}, []string{"result"}) // found / not_found / error
+
+	// AI 流结束原因。reason 只能是枚举值：
+	// normal / idle_timeout / max_duration / client_cancel / upstream_error
+	// 绝不能放模型名或用户输入 —— 那会把时间序列撑爆。
+	AIStreamTerminatedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "flowgate_ai_stream_terminated_total",
+		Help: "AI 流式请求的结束原因分布",
+	}, []string{"reason"})
 )
 
 func init() {
@@ -263,6 +348,9 @@ func init() {
 		QueueDepth,
 		BulkheadInflight,
 		BulkheadRejectedTotal,
+		// 日志队列
+		LogDroppedTotal,
+		LogQueueDepth,
 		// PostgreSQL 连接池观测
 		PGPoolAcquiredConns,
 		PGPoolIdleConns,
@@ -277,5 +365,15 @@ func init() {
 		PGPoolDestroyedIdleTotal,
 		PGPoolAcquireSecondsTotal,
 		PGPoolEmptyAcquireWaitSecondsTotal,
+		UpstreamFailuresTotal,
+		ClientCancelTotal,
+		TPMDegradedTotal,
+		InstanceInflight,
+		AuthCacheEntries,
+		AuthCacheHitsTotal,
+		AuthCacheEvictionsTotal,
+		AuthCacheMissesTotal,
+		AuthDBSearchesTotal,
+		AIStreamTerminatedTotal,
 	)
 }
