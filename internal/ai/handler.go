@@ -164,8 +164,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeError(w, http.StatusRequestEntityTooLarge, ErrTypeInvalidRequest,
+				fmt.Sprintf("请求体超过上限 %d 字节", maxRequestBody))
+			return
+		}
 		writeError(w, http.StatusBadRequest, ErrTypeInvalidRequest,
 			"读取请求体失败: "+err.Error())
 		return

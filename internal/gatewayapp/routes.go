@@ -101,7 +101,7 @@ func (m *RouteManager) Start() {
 			case <-ticker.C:
 
 				if n := m.cache.Sweep(proxyCacheIdleTTL); n > 0 {
-					log.Panicf("回收空闲 Transport %d 个", n)
+					log.Printf("回收空闲 Transport %d 个", n)
 				}
 
 				ver, table, err := m.Load()

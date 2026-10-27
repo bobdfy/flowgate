@@ -185,8 +185,11 @@ func main() {
 	go postgres.StartPoolStats(statsCtx, db, time.Second)
 
 	srv := &http.Server{
-		Addr:    cfg.Addr,
-		Handler: handler,
+		Addr:              cfg.Addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	if cfg.PProf {

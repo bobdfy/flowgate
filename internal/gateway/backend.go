@@ -37,6 +37,9 @@ type Backend struct {
 const (
 	// backoffMax 退避封顶，重试间隔最长不超过这个值。
 	backoffMax = time.Second
+
+	// maxProxyRequestBody 普通转发路径的请求体上限
+	maxProxyRequestBody = 32 << 20 // 32MiB
 )
 
 // ServeHTTP 实现 http.Handler：挑一个健康实例转发，失败按配置重试（换节点 + 退避），最后把「最终那次」的响应（或错误）一次性 flush 给客户端。
@@ -87,9 +90,16 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// 所以先整读进内存，每轮重试前重新包 reader 发出去。
 	var reqBody []byte
 	if req.Body != nil {
+		req.Body = http.MaxBytesReader(w, req.Body, maxProxyRequestBody)
 		reqBody, err = io.ReadAll(req.Body)
 		req.Body.Close()
 		if err != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				w.Header().Set("Connection", "close")
+				http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
