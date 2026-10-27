@@ -122,7 +122,7 @@ func (s *UsageStore) insert(batch []model.AIUsage) {
 		rows[i] = []any{
 			u.TenantID, u.KeyID, u.Model,
 			u.PromptTokens, u.CompletionTokens, u.TotalTokens, u.Estimated,
-			u.StatusCode, u.Streaming, u.DurationMS, u.RequestID, u.CreatedAt,
+			u.StatusCode, u.Streaming, u.DurationMS, u.TTFTMS, u.RequestID, u.CreatedAt,
 		}
 	}
 
@@ -130,7 +130,7 @@ func (s *UsageStore) insert(batch []model.AIUsage) {
 		[]string{
 			"tenant_id", "key_id", "model",
 			"prompt_tokens", "completion_tokens", "total_tokens", "estimated",
-			"status_code", "streaming", "duration_ms", "request_id", "created_at",
+			"status_code", "streaming", "duration_ms", "ttft_ms", "request_id", "created_at",
 		},
 		pgx.CopyFromRows(rows),
 	)
@@ -151,7 +151,7 @@ type UsageQuery struct {
 }
 
 const usageColumns = `id, tenant_id, key_id, model, prompt_tokens, completion_tokens,
-	total_tokens, estimated, status_code, streaming, duration_ms, request_id, created_at`
+	total_tokens, estimated, status_code, streaming, duration_ms, ttft_ms,request_id, created_at`
 
 // List 按时间倒序返回明细。
 func (s *UsageStore) List(ctx context.Context, q UsageQuery) ([]model.AIUsage, error) {
@@ -163,10 +163,7 @@ func (s *UsageStore) List(ctx context.Context, q UsageQuery) ([]model.AIUsage, e
 	if limit > 1000 {
 		limit = 1000
 	}
-	offset := q.Offset
-	if offset < 0 {
-		offset = 0
-	}
+	offset := max(q.Offset, 0)
 
 	sql := fmt.Sprintf(`SELECT %s FROM ai_usage%s
 		ORDER BY created_at DESC, id DESC
@@ -184,7 +181,7 @@ func (s *UsageStore) List(ctx context.Context, q UsageQuery) ([]model.AIUsage, e
 		var u model.AIUsage
 		if err := rows.Scan(&u.ID, &u.TenantID, &u.KeyID, &u.Model,
 			&u.PromptTokens, &u.CompletionTokens, &u.TotalTokens, &u.Estimated,
-			&u.StatusCode, &u.Streaming, &u.DurationMS, &u.RequestID, &u.CreatedAt); err != nil {
+			&u.StatusCode, &u.Streaming, &u.DurationMS, &u.TTFTMS, &u.RequestID, &u.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan ai usage row failed: %w", err)
 		}
 		out = append(out, u)
