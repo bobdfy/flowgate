@@ -19,10 +19,15 @@ type AIProvider struct {
 
 // AIModel 对应表 ai_models（对外模型别名）。
 type AIModel struct {
-	Name          string    `json:"name"`
-	ProviderName  string    `json:"provider_name"`
-	UpstreamModel string    `json:"upstream_model"` // 空 = 与别名相同
-	Enabled       bool      `json:"enabled"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	Name          string `json:"name"`
+	ProviderName  string `json:"provider_name"`
+	UpstreamModel string `json:"upstream_model"` // 空 = 与别名相同
+
+	// MaxConcurrency 是发往这个模型的在途请求上限，0 表示不限。
+	// 名额覆盖整条 SSE 生命周期，避免单个模型的慢流吃光实例级名额。
+	MaxConcurrency int `json:"max_concurrency"`
+
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }

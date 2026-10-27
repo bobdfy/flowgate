@@ -55,6 +55,10 @@ type ProviderEntry struct {
 	// StreamUsage 表示上游支持 stream_options.include_usage。
 	// 开启后网关会替没要 usage 的客户端向上游要，结算用真实值，再把 usage 帧吞掉。
 	StreamUsage bool
+
+	// MaxConcurrency 是发往这个模型的在途请求上限，0 = 不限。
+	// 名额跟着整条请求（含整条 SSE）走，超限快速拒绝，不排队。
+	MaxConcurrency int
 }
 
 // Handler 处理 AI 请求（OpenAI 兼容接口）。
@@ -72,6 +76,10 @@ type Handler struct {
 
 	// usage 可为 nil（不记录用量）。
 	usage UsageRecorder
+
+	// limits 是模型级并发名额，key 是对外模型名。
+	// 没配上限（MaxConcurrency<=0）的模型不进这个 map，取到 nil 即不限。
+	limits map[string]*modelLimiter
 }
 
 // ttftStartKey [网关开始处理本请求的时刻]，供流式转发算 token 耗时
@@ -139,10 +147,18 @@ func NewHandler(provider map[string]*ProviderEntry, clients *Clients) *Handler {
 	if clients == nil {
 		clients = NewClients(nil, DefaultTimeouts()) // 兜底：宁可全拒，也不能变成不校验
 	}
+	limits := make(map[string]*modelLimiter, len(provider))
+	for name, e := range provider {
+		if e != nil && e.MaxConcurrency > 0 {
+			limits[name] = newModelLimiter(name, e.MaxConcurrency)
+		}
+	}
+
 	return &Handler{
 		providers: provider,
 		clients:   clients,
 		streams:   streamProxy,
+		limits:    limits,
 	}
 }
 
@@ -239,7 +255,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5.2 用量流水：模型解析通过后开始记录，状态码由 statusWriter 捕获。
+	// 5.2 模型级并发名额：覆盖整条请求（含整条 SSE）。
+	// 必须在这里 defer —— 放在 forward() 里会在拿到响应头时就归还，
+	// 那时流还没开始读，上限等于没设。
+	release, slotOK := h.acquireModelSlot(w, r, req.Model)
+	if !slotOK {
+		return
+	}
+	defer release()
+
+	// 5.3 用量流水：模型解析通过后开始记录，状态码由 statusWriter 捕获。
 	start := time.Now()
 	r = r.WithContext(context.WithValue(r.Context(), ttftStartKey{}, start))
 

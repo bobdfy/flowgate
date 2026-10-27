@@ -331,6 +331,19 @@ var (
 		Name: "flowgate_ai_stream_terminated_total",
 		Help: "AI 流式请求的结束原因分布",
 	}, []string{"reason"})
+
+	// AI 模型级并发超限被拒。
+	// model 是管理面配置的模型别名（有界集合）；scope 是枚举：model / tenant。
+	AIModelConcurrencyRejected = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "flowgate_ai_concurrency_rejected_total",
+		Help: "AI 模型级并发超限被拒绝的请求数",
+	}, []string{"model", "scope"})
+
+	// AI 模型当前在途请求数（覆盖整条 SSE，含客户端还没读完的部分）。
+	AIModelInflight = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "flowgate_ai_model_inflight",
+		Help: "AI 模型当前在途请求数",
+	}, []string{"model"})
 )
 
 func init() {
@@ -375,5 +388,8 @@ func init() {
 		AuthCacheMissesTotal,
 		AuthDBSearchesTotal,
 		AIStreamTerminatedTotal,
+		// AI 模型级并发
+		AIModelConcurrencyRejected,
+		AIModelInflight,
 	)
 }
