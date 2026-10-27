@@ -344,6 +344,19 @@ var (
 		Name: "flowgate_ai_model_inflight",
 		Help: "AI 模型当前在途请求数",
 	}, []string{"model"})
+
+	// AI provider 熔断状态：0=closed, 1=open, 2=half_open。
+	// 与普通链路的 flowgate_circuit_state 分开，避免把 provider 名塞进 addr 标签。
+	AICircuitState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "flowgate_ai_circuit_state",
+		Help: "AI provider 熔断状态：0=closed, 1=open, 2=half_open",
+	}, []string{"provider"})
+
+	// 熔断打开期间被快速拒绝的请求数。
+	AIBreakerRejected = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "flowgate_ai_breaker_rejected_total",
+		Help: "AI provider 熔断期间被快速拒绝的请求数",
+	}, []string{"provider"})
 )
 
 func init() {
@@ -391,5 +404,7 @@ func init() {
 		// AI 模型级并发
 		AIModelConcurrencyRejected,
 		AIModelInflight,
+		AICircuitState,
+		AIBreakerRejected,
 	)
 }
