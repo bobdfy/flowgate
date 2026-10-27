@@ -45,7 +45,7 @@ func ParseFlags() *Config {
 
 	flag.StringVar(&c.FailMode, "fail-mode", "fallback", "Redis 故障时的策略:closed / fallback / open")
 
-	flag.DurationVar(&c.AuthCacheTTL, "auth-cache-ttl", 0, "鉴权结果进程内缓存 TTL（>0 启用；0 关闭）")
+	flag.DurationVar(&c.AuthCacheTTL, "auth-cache-ttl", 30*time.Second, "鉴权结果进程内缓存 TTL（>0 启用；0 关闭）")
 
 	flag.DurationVar(&c.TPMWindow, "tpm-window", time.Minute, "TPM 配额窗口长度（如 1m / 5m / 1h）")
 

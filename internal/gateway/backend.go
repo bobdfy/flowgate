@@ -77,7 +77,7 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}) {
 			return
 		}
-
+		return
 	}
 
 	defer release()

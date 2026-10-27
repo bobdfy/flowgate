@@ -8,18 +8,27 @@ import (
 	"time"
 
 	"github.com/bobdfy/flowgate/internal/identity"
-	"github.com/bobdfy/flowgate/internal/store/postgres"
+	"github.com/bobdfy/flowgate/internal/model"
+	"github.com/bobdfy/flowgate/internal/observability"
+	"golang.org/x/sync/singleflight"
 )
+
+type keyLookup interface {
+	GetByHash(ctx context.Context, hash string) (*model.APIKey, error)
+}
 
 // Authenticator 鉴权器, 依赖 APIKeyStore 查库。
 // 内建进程内 TTL 缓存：hash → APIKey（含负缓存）
 type Authenticator struct {
-	keys  *postgres.APIKeyStore
+	keys  keyLookup
 	cache *authCache
+
+	// sf 合并同一 key 的并发 miss：热点 key 刚过期就融入几百请求只一次数据库查询
+	sf singleflight.Group
 }
 
 // NewAuthenticator 创建一个鉴权器（默认关闭缓存，保持旧行为）。
-func NewAuthenticator(keys *postgres.APIKeyStore) *Authenticator {
+func NewAuthenticator(keys keyLookup) *Authenticator {
 	return &Authenticator{
 		keys: keys,
 		// ttl=0 → 缓存禁用，每请求都查库。
@@ -29,7 +38,7 @@ func NewAuthenticator(keys *postgres.APIKeyStore) *Authenticator {
 
 // NewAuthenticatorWithCache 创建一个带鉴权缓存的鉴权器。
 // ttl 是缓存有效期；<=0 时退化为 NewAuthenticator（缓存禁用）
-func NewAuthenticatorWithCache(keys *postgres.APIKeyStore, ttl time.Duration) *Authenticator {
+func NewAuthenticatorWithCache(keys keyLookup, ttl time.Duration) *Authenticator {
 	return &Authenticator{
 		keys:  keys,
 		cache: newAuthCache(ttl),
@@ -41,6 +50,35 @@ func NewAuthenticatorWithCache(keys *postgres.APIKeyStore, ttl time.Duration) *A
 // 缓存未启用时是空操作。
 func (a *Authenticator) InvalidateCache() {
 	a.cache.clear()
+}
+
+// loadKey 在缓存未命中时回源，并用 singleflight 合并同一 key 的并发 miss
+func (a *Authenticator) loadKey(ctx context.Context, hash string) (*model.APIKey, error) {
+	if a.cache.disabled() {
+		k, err := a.keys.GetByHash(ctx, hash)
+		recordDBSearch(k, err)
+		return k, err
+	}
+
+	v, err, _ := a.sf.Do(hash, func() (any, error) {
+		if k, hit := a.cache.peek(hash); hit {
+			return k, nil
+		}
+		k, err := a.keys.GetByHash(ctx, hash)
+		recordDBSearch(k, err)
+		if err != nil {
+			return nil, err
+		}
+		a.cache.put(hash, k)
+		return k, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	k, _ := v.(*model.APIKey)
+	return k, nil
+
 }
 
 // apiKeyFromRequest 取客户端 key：优先 X-API-Key，其次 Authorization: Bearer。
@@ -56,6 +94,18 @@ func apiKeyFromRequest(r *http.Request) string {
 		return strings.TrimSpace(auth[len(prefix):])
 	}
 	return ""
+}
+
+// setIdentity 把 key 对应的身份写进 ctx，交给下游（限流 / AI 网关 / 用量记录）。
+func setIdentity(ctx context.Context, k *model.APIKey) context.Context {
+	return identity.WithIdentity(ctx, &identity.Identity{
+		TenantID:      k.TenantID,
+		KeyID:         k.ID,
+		TenantQPS:     k.TenantQPSLimit,
+		TenantTPM:     k.TenantTPMLimit,
+		KeyQPS:        k.QPSLimit,
+		AllowedModels: k.AllowedModels,
+	})
 }
 
 // RequireAuth 返回鉴权中间件。
@@ -95,45 +145,25 @@ func (a *Authenticator) RequireAuth(next http.Handler, responder ErrorResponder)
 				fail(w, r, http.StatusUnauthorized, "API Key 无效或已停用")
 				return
 			}
-			ctx := identity.WithIdentity(r.Context(), &identity.Identity{
-				TenantID:      k.TenantID,
-				KeyID:         k.ID,
-				TenantQPS:     k.TenantQPSLimit,
-				TenantTPM:     k.TenantTPMLimit,
-				KeyQPS:        k.QPSLimit,
-				AllowedModels: k.AllowedModels,
-			})
-			next.ServeHTTP(w, r.WithContext(ctx))
+
+			next.ServeHTTP(w, r.WithContext(setIdentity(r.Context(), k)))
 			return
 		}
 
-		k, err := a.keys.GetByHash(r.Context(), hash)
+		// 未命中（含过期）：singleflight 合并回源。
+		k, err := a.loadKey(r.Context(), hash)
 		if err != nil {
 			slog.Error("auth_lookup_failed", "err", err)
 			fail(w, r, http.StatusInternalServerError, "鉴权查询失败")
 			return
 		}
-
-		// 无论命中与否都写缓存（含负缓存），避免无效 key 打穿数据库。
-		a.cache.put(hash, k)
-
 		if k == nil {
 			slog.Warn("auth_invalid_key", "path", r.URL.Path)
 			fail(w, r, http.StatusUnauthorized, "API Key 无效或已停用")
 			return
 		}
 
-		// 把身份写进 context，下游（限流 / AI 网关 / 用量记录）从这里取。
-		// 用 identity.WithIdentity 而不是直接 context.WithValue
-		ctx := identity.WithIdentity(r.Context(), &identity.Identity{
-			TenantID:      k.TenantID,
-			KeyID:         k.ID,
-			TenantQPS:     k.TenantQPSLimit,
-			TenantTPM:     k.TenantTPMLimit,
-			KeyQPS:        k.QPSLimit,
-			AllowedModels: k.AllowedModels,
-		})
-		next.ServeHTTP(w, r.WithContext(ctx))
+		next.ServeHTTP(w, r.WithContext(setIdentity(r.Context(), k)))
 	})
 }
 
@@ -145,4 +175,16 @@ func FromContext(ctx context.Context) (*identity.Identity, bool) {
 // HashKey 返回 key 的 SHA256 十六进制哈希。
 func HashKey(key string) string {
 	return identity.HashKey(key)
+}
+
+// recordDBSearch 记一次回源结果。缓存开/关两条路径都要记，否则开缓存前后的回源量没法对比。
+func recordDBSearch(k *model.APIKey, err error) {
+	switch {
+	case err != nil:
+		observability.AuthDBSearchesTotal.WithLabelValues("error").Inc()
+	case k == nil:
+		observability.AuthDBSearchesTotal.WithLabelValues("not_found").Inc()
+	default:
+		observability.AuthDBSearchesTotal.WithLabelValues("found").Inc()
+	}
 }

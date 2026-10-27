@@ -301,6 +301,29 @@ var (
 		Name: "flowgate_instance_inflight_requests",
 		Help: "实例级在途请求数（入口护栏）",
 	})
+
+	// 鉴权缓存
+	AuthCacheEntries = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "flowgate_auth_cache_entries",
+		Help: "鉴权缓存当前条目数（正缓存 + 负缓存）",
+	})
+	AuthCacheHitsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "flowgate_auth_cache_hits_total",
+		Help: "鉴权缓存命中次数",
+	})
+	AuthCacheMissesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "flowgate_auth_cache_misses_total",
+		Help: "鉴权缓存未命中次数（含过期）",
+	})
+	AuthCacheEvictionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "flowgate_auth_cache_evictions_total",
+		Help: "因容量上限被淘汰的条目数",
+	})
+	AuthDBSearchesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "flowgate_auth_db_searches_total",
+		Help: "鉴权回源数据库的查询次数",
+	}, []string{"result"}) // found / not_found / error
+
 )
 
 func init() {
@@ -339,5 +362,10 @@ func init() {
 		ClientCancelTotal,
 		TPMDegradedTotal,
 		InstanceInflight,
+		AuthCacheEntries,
+		AuthCacheHitsTotal,
+		AuthCacheEvictionsTotal,
+		AuthCacheMissesTotal,
+		AuthDBSearchesTotal,
 	)
 }

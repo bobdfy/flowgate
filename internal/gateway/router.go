@@ -186,6 +186,7 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 		middleware.WriteOverload(w, err, best.pattern, func(reason string) {
 			observability.BulkheadRejectedTotal.WithLabelValues(best.pattern, reason).Inc()
 		})
+		return
 	}
 	defer release()
 

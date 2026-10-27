@@ -56,7 +56,9 @@ services:
       #   - host.docker.internal → Docker 桥接网段（172.16.0.0/12）
       #   - 宿主机上的 mockai（8095）、ollama 等，同样走 host.docker.internal
       # 生产环境按实际部署网段收窄，不要直接照抄。
-      ALLOW_UPSTREAM_CIDRS: "172.16.0.0/12"
+      #   - Docker Desktop 的 host.docker.internal 在这里解析到 192.168.65.254，
+      #     所以要把 192.168.65.0/24 也放进来，否则会被 SSRF 防护挡掉。
+      ALLOW_UPSTREAM_CIDRS: "172.16.0.0/12,192.168.65.0/24"
     ports:
       - "8090:8090"
       - "127.0.0.1:9090:9090"
