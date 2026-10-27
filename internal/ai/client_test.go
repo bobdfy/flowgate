@@ -20,7 +20,7 @@ func TestNewClientsBlocksPrivateUpstream(t *testing.T) {
 	defer srv.Close()
 
 	// 不传白名单 → 127.0.0.1 属于回环，应当被拒。
-	resp, err := NewClients(nil).Stream.Get(srv.URL)
+	resp, err := NewClients(nil, DefaultTimeouts()).Stream.Get(srv.URL)
 	if err == nil {
 		resp.Body.Close()
 		t.Fatal("回环地址应当被拨号层拒绝，但请求成功了")
@@ -51,7 +51,7 @@ func TestNewClientsDoesNotFollowRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := NewClients(policy).Stream.Get(redirector.URL)
+	resp, err := NewClients(policy, DefaultTimeouts()).Stream.Get(redirector.URL)
 	if err != nil {
 		t.Fatalf("请求本身不应失败: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestNewHandlerFallsBackToGuardedClients(t *testing.T) {
 // 一旦设置，超过该时长的 SSE 流会在中途被硬掐断——客户端只看到半句话，不会报错。
 // 非流式则相反：必须有时长上界，否则上游慢滴流可以永久占住 goroutine。
 func TestStreamClientHasNoTotalTimeout(t *testing.T) {
-	c := NewClients(nil)
+	c := NewClients(nil, DefaultTimeouts())
 
 	if c.Stream.Timeout != 0 {
 		t.Fatalf("流式 client 不能设置 Timeout（会掐断长流），当前 %s", c.Stream.Timeout)
@@ -127,6 +127,7 @@ func TestForwardPicksClientByStreaming(t *testing.T) {
 			h := NewHandler(nil, &Clients{
 				Stream:   &http.Client{Transport: stream},
 				Buffered: &http.Client{Transport: buffered},
+				timeouts: &Timeouts{}, // forward 会读 StreamMax，不给就是 nil 解引用
 			})
 			entry := &ProviderEntry{Name: "p", BaseURL: "http://upstream.example"}
 
@@ -166,7 +167,7 @@ func TestBufferedClientTimeoutIsEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := NewClients(policy)
+	c := NewClients(policy, DefaultTimeouts())
 	c.Buffered.Timeout = 50 * time.Millisecond // 仅本测试：缩短以便快速验证语义
 
 	if _, err := c.Buffered.Get(slow.URL); err == nil {

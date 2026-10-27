@@ -18,6 +18,7 @@ import (
 	"github.com/bobdfy/flowgate/internal/identity"
 	"github.com/bobdfy/flowgate/internal/model"
 	"github.com/bobdfy/flowgate/internal/netguard"
+	"github.com/bobdfy/flowgate/internal/observability"
 	"github.com/bobdfy/flowgate/internal/quota"
 )
 
@@ -73,23 +74,39 @@ type Handler struct {
 	usage UsageRecorder
 }
 
+// Timeout 是 AI 链路的分层超时
+type Timeouts struct {
+	Connect        time.Duration // TCP 建连
+	ResponseHeader time.Duration // 发出请求到收到响应头
+	Buffered       time.Duration // 非流式请求总时长
+	StreamIdle     time.Duration // 流式读空闲： 多久没数据就断
+	StreamMax      time.Duration // 流式总时长上限: 0 = 不限
+}
+
+func DefaultTimeouts() Timeouts {
+	return Timeouts{5 * time.Second, 60 * time.Second, 60 * time.Second, 60 * time.Second, 0}
+}
+
 // Clients 把流式和非流式两种超时语义分开
 type Clients struct {
 	Stream   *http.Client
 	Buffered *http.Client
+	timeouts *Timeouts
 }
 
 // NewClient 构造 AI 链路的 HTTP 客户端。policy 为 nil 时默认拒绝所有内网上游。
 //
 //	客户端要由调用方创建一次并长期复用，不要在每次重建 Handler 时新建
-func NewClients(policy *netguard.Policy) *Clients {
+func NewClients(policy *netguard.Policy, t Timeouts) *Clients {
 	tr := &http.Transport{
 		// 拨号层校验与普通转发共用 netguard，不因为走的是 AI 链路就放宽。
-		DialContext:         policy.Dialer(5 * time.Second).DialContext,
+		DialContext: policy.Dialer(t.Connect).DialContext,
+
 		MaxIdleConnsPerHost: 64,
+
 		// 即使 Transport 被换掉，空闲连接也会在 90s 后自行关闭，不会无限堆积。
 		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
+		ResponseHeaderTimeout: t.ResponseHeader,
 	}
 
 	noRedirect := func(*http.Request, []*http.Request) error {
@@ -101,14 +118,16 @@ func NewClients(policy *netguard.Policy) *Clients {
 		Stream: &http.Client{Transport: tr, CheckRedirect: noRedirect},
 
 		// 非流式
-		Buffered: &http.Client{Timeout: 60 * time.Second, Transport: tr, CheckRedirect: noRedirect},
+		Buffered: &http.Client{Timeout: t.Buffered, Transport: tr, CheckRedirect: noRedirect},
+
+		timeouts: &t,
 	}
 }
 
 // NewHandler 创建 AI 处理器。client 由调用方持有并复用（见 NewClient）。
 func NewHandler(provider map[string]*ProviderEntry, clients *Clients) *Handler {
 	if clients == nil {
-		clients = NewClients(nil) // 兜底：宁可全拒，也不能变成不校验
+		clients = NewClients(nil, DefaultTimeouts()) // 兜底：宁可全拒，也不能变成不校验
 	}
 	return &Handler{
 		providers: provider,
@@ -444,8 +463,21 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 	usage := newStreamUsage(body, stripUsage)
 
 	if err := h.streams(w, r, resp.Body, usage.sink(), model); err != nil {
-		// 响应头可能已经发出去了，只能记日志。
-		slog.Warn("ai_stream_failed", "model", model, "err", err)
+		reason := "upstream_error"
+		if b, ok := resp.Body.(*streamBody); ok {
+			switch {
+			case b.idleHit.Load():
+				reason = "idle_timeout" // 上游不说话
+			case r.Context().Err() != nil:
+				reason = "client_cancel" // 用户自己走了
+			case errors.Is(err, context.DeadlineExceeded):
+				reason = "max_duration" // 说太久了
+			}
+		}
+		observability.AIStreamTerminatedTotal.WithLabelValues(reason).Inc()
+		slog.Warn("ai_stream_failed", "model", model, "reason", reason, "err", err)
+	} else {
+		observability.AIStreamTerminatedTotal.WithLabelValues("normal").Inc()
 	}
 	if settler != nil {
 		settler.Settle(usage.actual())
@@ -477,7 +509,23 @@ func (h *Handler) forward(r *http.Request, entry *ProviderEntry, apiName ApiName
 
 	url := joinURL(entry.BaseURL, path)
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, url, bytes.NewReader(body))
+	ctx := r.Context()
+	var cancels []context.CancelFunc
+	if streaming {
+		// 流式必须始终有一个可取消的 ctx：读空闲计时器要靠它把阻塞的 Read 打断，
+		// 不能只在配了总时长上限时才建 —— 否则 StreamMax=0（默认）时空闲超时是哑的。
+		var cancelIdle context.CancelFunc
+		ctx, cancelIdle = context.WithCancel(ctx)
+		cancels = append(cancels, cancelIdle)
+
+		if h.clients.timeouts.StreamMax > 0 {
+			var cancelMax context.CancelFunc
+			ctx, cancelMax = context.WithTimeout(ctx, h.clients.timeouts.StreamMax)
+			cancels = append(cancels, cancelMax)
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, r.Method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -515,7 +563,23 @@ func (h *Handler) forward(r *http.Request, entry *ProviderEntry, apiName ApiName
 	if streaming {
 		c = h.clients.Stream
 	}
-	return c.Do(req)
+
+	resp, err := c.Do(req)
+	if err != nil {
+		for _, f := range cancels {
+			f()
+		} // Do 失败时没人会 Close，这里兜住
+		return nil, err
+	}
+	if streaming {
+		resp.Body = newStreamBody(resp.Body, h.clients.timeouts.StreamIdle, func() {
+			for _, f := range cancels {
+				f()
+			}
+		})
+	}
+	return resp, nil
+
 }
 
 // parseChatRequest 解析 Chat Completions 请求体。

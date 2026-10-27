@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bobdfy/flowgate/internal/ai"
 	"github.com/bobdfy/flowgate/internal/gateway"
 	"github.com/bobdfy/flowgate/internal/gatewayapp"
 	"github.com/bobdfy/flowgate/internal/middleware"
@@ -146,7 +147,13 @@ func main() {
 	aiCtx, aiCancel := context.WithCancel(context.Background())
 	defer aiCancel()
 
-	aiRT := gatewayapp.NewAIRuntime(aiCtx, *aiCfg, tpmLimiter, aiConfigStore, usageStore, upstreamPolicy)
+	aiRT := gatewayapp.NewAIRuntime(aiCtx, *aiCfg, tpmLimiter, aiConfigStore, usageStore, upstreamPolicy, ai.Timeouts{
+		Connect:        cfg.AIConnectTimeout,
+		ResponseHeader: cfg.AIResponseHeaderTimeout,
+		Buffered:       cfg.AIBufferedTimeout,
+		StreamIdle:     cfg.AIStreamIdleTimeout,
+		StreamMax:      cfg.AIStreamMaxDuration,
+	})
 	aiRT.Start(aiCtx)
 
 	// 节点健康 + AI 加载结果只在本进程内存里，定期写 Redis 给管理面读取。

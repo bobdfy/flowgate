@@ -324,6 +324,13 @@ var (
 		Help: "鉴权回源数据库的查询次数",
 	}, []string{"result"}) // found / not_found / error
 
+	// AI 流结束原因。reason 只能是枚举值：
+	// normal / idle_timeout / max_duration / client_cancel / upstream_error
+	// 绝不能放模型名或用户输入 —— 那会把时间序列撑爆。
+	AIStreamTerminatedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "flowgate_ai_stream_terminated_total",
+		Help: "AI 流式请求的结束原因分布",
+	}, []string{"reason"})
 )
 
 func init() {
@@ -367,5 +374,6 @@ func init() {
 		AuthCacheEvictionsTotal,
 		AuthCacheMissesTotal,
 		AuthDBSearchesTotal,
+		AIStreamTerminatedTotal,
 	)
 }

@@ -29,6 +29,11 @@ type Config struct {
 
 	MaxInflight int // 实例级在途请求上限
 
+	AIConnectTimeout        time.Duration
+	AIResponseHeaderTimeout time.Duration
+	AIBufferedTimeout       time.Duration
+	AIStreamIdleTimeout     time.Duration
+	AIStreamMaxDuration     time.Duration
 }
 
 // ParseFlags 定义并解析命令行参数。只能在 main 里调用一次。
@@ -62,6 +67,16 @@ func ParseFlags() *Config {
 
 	flag.IntVar(&c.MaxInflight, "max-inflight", 1000, "实例级在途请求上限（0 表示不限制，仅用于压测对照）")
 
+	flag.DurationVar(&c.AIConnectTimeout, "ai-connect-timeout", 5*time.Second, "必须要大于0")
+
+	flag.DurationVar(&c.AIResponseHeaderTimeout, "ai-response-header-timeout", 60*time.Second, "必须要大于0")
+
+	flag.DurationVar(&c.AIBufferedTimeout, "ai-buffered-timeout", 60*time.Second, "必须要大于0")
+
+	flag.DurationVar(&c.AIStreamIdleTimeout, "ai-stream-idle-timeout", 60*time.Second, "必须要大于0")
+
+	flag.DurationVar(&c.AIStreamMaxDuration, "ai-stream-max-duration", 0, ">= 0")
+
 	flag.Parse()
 	return c
 }
@@ -89,6 +104,29 @@ func (c *Config) Validate() error {
 	if _, err := c.UpstreamPolicy(); err != nil {
 		return fmt.Errorf("allow-upstream-cidrs 非法: %w", err)
 	}
+
+	// AI 分层超时：0 或负数会让对应的保护静默失效
+	// （ResponseHeaderTimeout=0 → 无限等头；Client.Timeout=0 → 非流式可被慢滴流永久占住；
+	//   StreamIdle<=0 → 不建计时器，读空闲保护直接消失）。
+	// 这类错误必须启动阶段就报出来，而不是等线上连接堆积才发现。
+	for _, it := range []struct {
+		name string
+		val  time.Duration
+	}{
+		{"ai-connect-timeout", c.AIConnectTimeout},
+		{"ai-response-header-timeout", c.AIResponseHeaderTimeout},
+		{"ai-buffered-timeout", c.AIBufferedTimeout},
+		{"ai-stream-idle-timeout", c.AIStreamIdleTimeout},
+	} {
+		if it.val <= 0 {
+			return fmt.Errorf("%s 必须大于 0，当前 %s", it.name, it.val)
+		}
+	}
+	// 0 = 不限总时长，是合法值；负数没有意义。
+	if c.AIStreamMaxDuration < 0 {
+		return fmt.Errorf("ai-stream-max-duration 不能为负（0 表示不限），当前 %s", c.AIStreamMaxDuration)
+	}
+
 	return nil
 }
 

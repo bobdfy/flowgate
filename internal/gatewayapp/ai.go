@@ -165,8 +165,8 @@ type AIRuntime struct {
 }
 
 // NewAIRuntime 构建运行时：先用 ai.yaml 兜底，再尝试导入种子并切到 DB 配置。
-func NewAIRuntime(ctx context.Context, cfg AIConfig, tpm quota.Limiter, store *postgres.AIConfigStore, usage *postgres.UsageStore, policy *netguard.Policy) *AIRuntime {
-	rt := &AIRuntime{store: store, tpm: tpm, usage: usage, clients: ai.NewClients(policy)}
+func NewAIRuntime(ctx context.Context, cfg AIConfig, tpm quota.Limiter, store *postgres.AIConfigStore, usage *postgres.UsageStore, policy *netguard.Policy, t ai.Timeouts) *AIRuntime {
+	rt := &AIRuntime{store: store, tpm: tpm, usage: usage, clients: ai.NewClients(policy, t)}
 
 	rt.handler.Store(buildAIHandler(cfg, rt.tpm, rt.usage, rt.clients))
 	rt.status.Enabled = cfg.Enabled
