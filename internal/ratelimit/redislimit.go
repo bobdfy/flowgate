@@ -58,9 +58,9 @@ return 0
 `
 
 type RedisLimiter struct {
-	rdb      *redis.Client
-	window   time.Duration // 窗口大小
-	script   *redis.Script
+	rdb        *redis.Client
+	window     time.Duration // 窗口大小
+	script     *redis.Script
 	pairScript *redis.Script
 }
 
