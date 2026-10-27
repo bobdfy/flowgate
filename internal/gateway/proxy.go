@@ -14,6 +14,11 @@ import (
 	"github.com/bobdfy/flowgate/internal/netguard"
 )
 
+type transportEntry struct {
+	transport *http.Transport
+	lastUsed  time.Time
+}
+
 // parseUpstream 解析上游地址，不带 scheme 时自动补 http://。
 func parseUpstream(addr string) (*url.URL, error) {
 	if !strings.Contains(addr, "://") {
@@ -33,13 +38,13 @@ func parseUpstream(addr string) (*url.URL, error) {
 // ProxyCache 按"上游地址 + 超时配置"缓存 Tranport，刷新时复用，避免反复新建 Transport。(缓存)
 type ProxyCache struct {
 	mu     sync.Mutex
-	m      map[string]*http.Transport
+	m      map[string]*transportEntry
 	policy *netguard.Policy
 }
 
 // NewProxyCache 创建一个空的 ProxyCache。policy 为 nil 时默认拒绝所有内网地址。
 func NewProxyCache(policy *netguard.Policy) *ProxyCache {
-	return &ProxyCache{m: map[string]*http.Transport{}, policy: policy}
+	return &ProxyCache{m: map[string]*transportEntry{}, policy: policy}
 }
 
 // 构建带超时的Tranport
@@ -75,16 +80,22 @@ func newTransport(svc model.Service, policy *netguard.Policy) *http.Transport {
 
 }
 
-// 按 key(`地址|connect_timeout|responseHeader_timeout`)查缓存，命中返回，未命中调用 `newTransport` 构造并缓存。
+// // 按 key(`地址|connect_timeout|responseHeader_timeout`)查缓存，命中返回，未命中调用 `newTransport` 构造并缓存
+func transportKey(u *url.URL, svc model.Service) string {
+	return fmt.Sprintf("%s|%d|%d|%d", u.String(),
+		svc.ConnectTimeoutMs, svc.ResponseHeaderTimeoutMs, svc.MaxConcurrency)
+}
+
 func (c *ProxyCache) get(u *url.URL, svc model.Service) *http.Transport {
-	key := fmt.Sprintf("%s|%d|%d|%d", u.String(), svc.ConnectTimeoutMs, svc.ResponseHeaderTimeoutMs, svc.MaxConcurrency)
+	key := transportKey(u, svc)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if t, ok := c.m[key]; ok {
-		return t
+	if e, ok := c.m[key]; ok {
+		e.lastUsed = time.Now()
+		return e.transport
 	}
 	t := newTransport(svc, c.policy)
-	c.m[key] = t
+	c.m[key] = &transportEntry{transport: t, lastUsed: time.Now()}
 	return t
 }
 
@@ -154,4 +165,21 @@ func copyHeader(dst, src http.Header) {
 			dst.Add(k, v)
 		}
 	}
+}
+
+// Sweep 回收超过 idleFor 未被使用的Transport
+func (c *ProxyCache) Sweep(idleFor time.Duration) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	cutoff := time.Now().Add(-idleFor)
+	n := 0
+	for k, e := range c.m {
+		if e.lastUsed.Before(cutoff) {
+			e.transport.CloseIdleConnections()
+			delete(c.m, k)
+			n++
+		}
+	}
+	return n
 }

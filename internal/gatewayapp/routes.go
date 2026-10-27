@@ -16,6 +16,9 @@ import (
 // routeRefreshInterval 是拉取新版本的间隔：管理面 publish 后最迟这么久生效。
 const routeRefreshInterval = 5 * time.Second
 
+// proxyCacheIdleTTL 是Transport 空闲多久算 [不会再被使用]
+const proxyCacheIdleTTL = 10 * time.Minute
+
 // RouteManager 负责路由表与节点池的生命周期。
 //
 // 它持有 pools：路由刷新 goroutine 会写，运行状态上报 goroutine 会读，
@@ -96,6 +99,11 @@ func (m *RouteManager) Start() {
 			case <-m.hcCtx.Done():
 				return
 			case <-ticker.C:
+
+				if n := m.cache.Sweep(proxyCacheIdleTTL); n > 0 {
+					log.Panicf("回收空闲 Transport %d 个", n)
+				}
+
 				ver, table, err := m.Load()
 				if err != nil {
 					log.Printf("刷新路由失败: %v", err)
