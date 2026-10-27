@@ -17,6 +17,7 @@ type AIUsage struct {
 	DurationMS       int       `json:"duration_ms"`
 	RequestID        string    `json:"request_id"`
 	CreatedAt        time.Time `json:"created_at"`
+	TTFTMS           int       `json:"ttft_ms"`
 }
 
 // AIUsageSummary 是按某个维度聚合后的用量。

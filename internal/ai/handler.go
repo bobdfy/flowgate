@@ -74,6 +74,16 @@ type Handler struct {
 	usage UsageRecorder
 }
 
+// ttftStartKey [网关开始处理本请求的时刻]，供流式转发算 token 耗时
+type ttftStartKey struct{}
+
+func ttftStart(ctx context.Context) time.Time {
+	if v, ok := ctx.Value(ttftStartKey{}).(time.Time); ok {
+		return v
+	}
+	return time.Time{}
+}
+
 // Timeout 是 AI 链路的分层超时
 type Timeouts struct {
 	Connect        time.Duration // TCP 建连
@@ -230,8 +240,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 5.2 用量流水：模型解析通过后开始记录，状态码由 statusWriter 捕获。
-	// 这次的 w 会被后面所有写操作共用，flush 通过 Unwrap 仍然能拿到原始 writer。
 	start := time.Now()
+	r = r.WithContext(context.WithValue(r.Context(), ttftStartKey{}, start))
+
 	sw := &statusWriter{ResponseWriter: w}
 	w = sw
 	rec := model.AIUsage{
@@ -487,6 +498,14 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 		rec.CompletionTokens = usage.completion()
 		rec.TotalTokens = usage.actual()
 		rec.Estimated = !usage.seen
+
+		// 非流式请求没有首帧概念，保持0
+		if !usage.firstEventAt.IsZero() {
+			if s := ttftStart(r.Context()); !s.IsZero() {
+				rec.TTFTMS = int(usage.firstEventAt.Sub(s).Milliseconds())
+			}
+		}
+
 	}
 	if usage.seen {
 		slog.Info("tpm_stream_usage",

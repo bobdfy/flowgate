@@ -30,6 +30,9 @@ func streamProxy(w http.ResponseWriter, r *http.Request, upstream io.ReadCloser,
 
 	//  打点用的变量。
 	start := time.Now()
+	if v := ttftStart(r.Context()); !v.IsZero() {
+		start = v
+	}
 	firstEventAt := time.Time{}
 	totalEvents := 0
 

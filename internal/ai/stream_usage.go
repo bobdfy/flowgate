@@ -3,6 +3,7 @@ package ai
 import (
 	"bytes"
 	"encoding/json"
+	"time"
 )
 
 type streamUsage struct {
@@ -13,6 +14,8 @@ type streamUsage struct {
 	total            int64
 	seen             bool
 	stripUsage       bool // 网关替客户端要的 usage：不发给客户端
+
+	firstEventAt time.Time // 首个 SSE 事件到达时刻，用于TTFT
 }
 
 func newStreamUsage(body []byte, stripUsage bool) *streamUsage {
@@ -25,6 +28,10 @@ func newStreamUsage(body []byte, stripUsage bool) *streamUsage {
 // sink 返回给 StreamingForwarder 的钩子：读事件做统计，必要时吞掉 usage 帧。
 func (u *streamUsage) sink() StreamEventSink {
 	return func(event []byte, isLast bool) []byte {
+		if u.firstEventAt.IsZero() {
+			u.firstEventAt = time.Now()
+		}
+
 		usageOnly := u.observe(event)
 		if usageOnly && u.stripUsage && !isLast {
 			return nil // writeEvent 会跳过 nil 事件
