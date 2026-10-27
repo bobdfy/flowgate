@@ -16,6 +16,7 @@ import (
 	"github.com/bobdfy/flowgate/internal/gateway"
 	"github.com/bobdfy/flowgate/internal/gatewayapp"
 	"github.com/bobdfy/flowgate/internal/middleware"
+	"github.com/bobdfy/flowgate/internal/overload"
 	"github.com/bobdfy/flowgate/internal/quota"
 	"github.com/bobdfy/flowgate/internal/ratelimit"
 	"github.com/bobdfy/flowgate/internal/store/postgres"
@@ -161,14 +162,18 @@ func main() {
 	// 网关自己拒绝请求时回什么 body：AI 路径回 OpenAI 错误结构，其余回纯文本。
 	errorResponder := middleware.OpenAIErrorResponder(gatewayapp.IsAIRoute)
 
+	guard := overload.NewGuard(cfg.MaxInflight, overload.StrategyFailFast, 0, 0)
+
 	handler := middleware.RequestID(
 		middleware.Logging(
-			authenticator.RequireAuth(
-				middleware.RateLimitPair(
-					limiter, gatewayapp.PairKey, gatewayapp.AIRouter(aiRT.Handler, router),
+			middleware.Inflight(guard, "instance")(
+				authenticator.RequireAuth(
+					middleware.RateLimitPair(
+						limiter, gatewayapp.PairKey, gatewayapp.AIRouter(aiRT.Handler, router),
+						errorResponder,
+					),
 					errorResponder,
 				),
-				errorResponder,
 			),
 		),
 	)

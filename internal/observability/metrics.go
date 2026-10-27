@@ -214,7 +214,7 @@ var (
 		},
 	)
 
-	// ★ 关键指标：取连接时池已空、需要等待别人释放或新建连接的累计次数。
+	// 关键指标：取连接时池已空、需要等待别人释放或新建连接的累计次数。
 	// 稳态下应当恒为 0；它开始增长 = 连接池成了瓶颈。
 	PGPoolEmptyAcquiresTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
@@ -296,6 +296,11 @@ var (
 		},
 		[]string{"mode"},
 	)
+
+	InstanceInflight = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "flowgate_instance_inflight_requests",
+		Help: "实例级在途请求数（入口护栏）",
+	})
 )
 
 func init() {
@@ -333,5 +338,6 @@ func init() {
 		UpstreamFailuresTotal,
 		ClientCancelTotal,
 		TPMDegradedTotal,
+		InstanceInflight,
 	)
 }

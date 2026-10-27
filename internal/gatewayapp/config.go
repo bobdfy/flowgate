@@ -25,9 +25,10 @@ type Config struct {
 	PProf        bool          // 启用 pprof 调试端点（固定 127.0.0.1:6060）
 	MetricsAddr  string        // Prometheus 指标监听地址（默认仅本机）
 
-	// AllowUpstreamCIDRs 是允许拨号的内网网段（逗号分隔），空表示一律拒绝。
-	// 默认为空等于「内网上游全部封死」，本地联调时必须显式写进来。
-	AllowUpstreamCIDRs string
+	AllowUpstreamCIDRs string // 允许拨号的内网网段（逗号分隔）。默认为空等于「内网上游全部封死」，本地联调时必须显式写进来。
+
+	MaxInflight int // 实例级在途请求上限
+
 }
 
 // ParseFlags 定义并解析命令行参数。只能在 main 里调用一次。
@@ -59,6 +60,8 @@ func ParseFlags() *Config {
 	flag.StringVar(&c.AllowUpstreamCIDRs, "allow-upstream-cidrs", os.Getenv("ALLOW_UPSTREAM_CIDRS"),
 		"允许访问的内网网段，逗号分隔（如 172.16.0.0/12,127.0.0.1/32）；默认空=禁止所有内网地址")
 
+	flag.IntVar(&c.MaxInflight, "max-inflight", 1000, "实例级在途请求上限（0 表示不限制，仅用于压测对照）")
+
 	flag.Parse()
 	return c
 }
@@ -76,6 +79,10 @@ func (c *Config) Validate() error {
 	case "closed", "fallback", "open":
 	default:
 		return fmt.Errorf("tpm-fail-mode 只能是 closed / fallback / open，当前 %q", c.TPMFailMode)
+	}
+
+	if c.MaxInflight < 0 {
+		return fmt.Errorf("max-inflight 不能为负，当前 %d", c.MaxInflight)
 	}
 
 	// 白名单写错必须启动即失败：静默忽略会让线上「看起来配了但实际全拦」。

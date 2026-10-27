@@ -30,7 +30,7 @@ type aiProviderConfig struct {
 	Name         string   // 厂商标识，日志和 /v1/models 的 owned_by 用
 	Endpoint     string   // 根地址，不带路径
 	UpstreamPath string   // 上游真实路径；空 = 用对外的 /v1/...
-	APIKeys      []string // key 池（阶段一只用第一个非空的）
+	APIKeys      []string // key 池
 	RawAPIKeys   []string // 配置文件原文（含 ${ENV}），用于首次导入 DB
 	Enabled      bool
 	StreamUsage  bool // 上游支持 stream_options.include_usage
@@ -155,7 +155,7 @@ type AIRuntime struct {
 	store   *postgres.AIConfigStore
 	tpm     quota.Limiter
 	usage   *postgres.UsageStore // 可为 nil（不记录用量）
-	client  *http.Client         // 复用同一个连接池：重建 handler 时不新建 Transport
+	clients *ai.Clients          // 复用同一个连接池：重建 handler 时不新建 Transport
 	handler atomic.Pointer[ai.Handler]
 	version atomic.Int64
 
@@ -166,8 +166,9 @@ type AIRuntime struct {
 
 // NewAIRuntime 构建运行时：先用 ai.yaml 兜底，再尝试导入种子并切到 DB 配置。
 func NewAIRuntime(ctx context.Context, cfg AIConfig, tpm quota.Limiter, store *postgres.AIConfigStore, usage *postgres.UsageStore, policy *netguard.Policy) *AIRuntime {
-	rt := &AIRuntime{store: store, tpm: tpm, usage: usage, client: ai.NewClient(policy)}
-	rt.handler.Store(buildAIHandler(cfg, tpm, usage, rt.client))
+	rt := &AIRuntime{store: store, tpm: tpm, usage: usage, clients: ai.NewClients(policy)}
+
+	rt.handler.Store(buildAIHandler(cfg, rt.tpm, rt.usage, rt.clients))
 	rt.status.Enabled = cfg.Enabled
 	if cfg.Enabled && len(cfg.Models) > 0 {
 		now := time.Now().UTC()
@@ -207,7 +208,7 @@ func (rt *AIRuntime) reload(ctx context.Context) {
 		return
 	}
 	cfg := aiConfigFromDB(providers, models)
-	rt.handler.Store(buildAIHandler(cfg, rt.tpm, rt.usage, rt.client))
+	rt.handler.Store(buildAIHandler(cfg, rt.tpm, rt.usage, rt.clients))
 	rt.version.Store(version)
 	rt.statusMu.Lock()
 	now := time.Now().UTC()
@@ -384,7 +385,7 @@ func envPlaceholder(s string) (string, bool) {
 }
 
 // buildAIHandler 按配置构造 AI 处理器；没有可用 model 时返回 nil。
-func buildAIHandler(cfg AIConfig, tpm quota.Limiter, usage *postgres.UsageStore, client *http.Client) *ai.Handler {
+func buildAIHandler(cfg AIConfig, tpm quota.Limiter, usage *postgres.UsageStore, clients *ai.Clients) *ai.Handler {
 	if !cfg.Enabled {
 		slog.Info("ai_gateway_off", "hint", "去掉 -ai=false 可启用")
 		return nil
@@ -443,7 +444,7 @@ func buildAIHandler(cfg AIConfig, tpm quota.Limiter, usage *postgres.UsageStore,
 	}
 
 	slog.Info("ai_gateway_enabled", "model_count", len(entries))
-	h := ai.NewHandler(entries, client)
+	h := ai.NewHandler(entries, clients)
 	h.SetTPM(tpm)
 	if usage != nil {
 		h.SetUsageRecorder(usage)

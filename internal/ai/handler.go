@@ -62,7 +62,7 @@ type Handler struct {
 	// 这是模型白名单的唯一实现点。
 	providers map[string]*ProviderEntry
 
-	client *http.Client
+	clients *Clients
 
 	// streams 是流式转发器，可为 nil（退化成缓冲转发）。
 	streams StreamingForwarder
@@ -73,37 +73,46 @@ type Handler struct {
 	usage UsageRecorder
 }
 
+// Clients 把流式和非流式两种超时语义分开
+type Clients struct {
+	Stream   *http.Client
+	Buffered *http.Client
+}
+
 // NewClient 构造 AI 链路的 HTTP 客户端。policy 为 nil 时默认拒绝所有内网上游。
 //
 //	客户端要由调用方创建一次并长期复用，不要在每次重建 Handler 时新建
-func NewClient(policy *netguard.Policy) *http.Client {
-	transport := &http.Transport{
+func NewClients(policy *netguard.Policy) *Clients {
+	tr := &http.Transport{
 		// 拨号层校验与普通转发共用 netguard，不因为走的是 AI 链路就放宽。
 		DialContext:         policy.Dialer(5 * time.Second).DialContext,
 		MaxIdleConnsPerHost: 64,
 		// 即使 Transport 被换掉，空闲连接也会在 90s 后自行关闭，不会无限堆积。
-		IdleConnTimeout: 90 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
 	}
 
-	return &http.Client{
-		Timeout:   60 * time.Second,
-		Transport: transport,
-		// 不跟随重定向：上游一个 302 就能把请求带到内网地址，
-		// 而 AI 接口没有靠重定向做业务的场景。
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	noRedirect := func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	return &Clients{
+		// 流式
+		Stream: &http.Client{Transport: tr, CheckRedirect: noRedirect},
+
+		// 非流式
+		Buffered: &http.Client{Timeout: 60 * time.Second, Transport: tr, CheckRedirect: noRedirect},
 	}
 }
 
 // NewHandler 创建 AI 处理器。client 由调用方持有并复用（见 NewClient）。
-func NewHandler(provider map[string]*ProviderEntry, client *http.Client) *Handler {
-	if client == nil {
-		client = NewClient(nil) // 兜底：宁可全拒，也不能变成不校验
+func NewHandler(provider map[string]*ProviderEntry, clients *Clients) *Handler {
+	if clients == nil {
+		clients = NewClients(nil) // 兜底：宁可全拒，也不能变成不校验
 	}
 	return &Handler{
 		providers: provider,
-		client:    client,
+		clients:   clients,
 		streams:   streamProxy,
 	}
 }
@@ -117,9 +126,9 @@ func (h *Handler) SetStreamingForwarder(f StreamingForwarder) {
 }
 
 // SetClient 替换底层 HTTP 客户端（测试用）。
-func (h *Handler) SetClient(c *http.Client) {
+func (h *Handler) SetClient(c *Clients) {
 	if c != nil {
-		h.client = c
+		h.clients = c
 	}
 }
 
@@ -496,7 +505,11 @@ func (h *Handler) forward(r *http.Request, entry *ProviderEntry, apiName ApiName
 		req.Header.Set("Accept", "application/json")
 	}
 
-	return h.client.Do(req)
+	c := h.clients.Buffered
+	if streaming {
+		c = h.clients.Stream
+	}
+	return c.Do(req)
 }
 
 // parseChatRequest 解析 Chat Completions 请求体。

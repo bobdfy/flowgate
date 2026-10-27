@@ -62,19 +62,22 @@ func newTransport(svc model.Service, policy *netguard.Policy) *http.Transport {
 		// 建连超时(TCP 三次握手)；DialControl 在解析之后、连接之前校验目标 IP，
 		// 配置期的 DNS 检查被绕过（DNS rebinding）时由这里兜底。
 		DialContext: policy.Dialer(connect).DialContext,
+
 		// 空闲连接保活
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: time.Duration(svc.ResponseHeaderTimeoutMs) * time.Millisecond,
 
 		MaxIdleConns:        maxPerHost,
 		MaxIdleConnsPerHost: maxPerHost,
+
+		MaxConnsPerHost: maxPerHost,
 	}
 
 }
 
 // 按 key(`地址|connect_timeout|responseHeader_timeout`)查缓存，命中返回，未命中调用 `newTransport` 构造并缓存。
 func (c *ProxyCache) get(u *url.URL, svc model.Service) *http.Transport {
-	key := fmt.Sprintf("%s|%d|%d", u.String(), svc.ConnectTimeoutMs, svc.ResponseHeaderTimeoutMs)
+	key := fmt.Sprintf("%s|%d|%d|%d", u.String(), svc.ConnectTimeoutMs, svc.ResponseHeaderTimeoutMs, svc.MaxConcurrency)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if t, ok := c.m[key]; ok {

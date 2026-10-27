@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"math"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bobdfy/flowgate/internal/loadbalance"
+	"github.com/bobdfy/flowgate/internal/middleware"
 	"github.com/bobdfy/flowgate/internal/model"
 	"github.com/bobdfy/flowgate/internal/observability"
 	"github.com/bobdfy/flowgate/internal/overload"
@@ -69,11 +69,12 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// 放在之后，排队 + 重试 + 转发 全程共享同一个 deadline，
 	release, err := b.guard.Acquire(req.Context())
 	if err != nil {
-		if rejectOverload(w, err, "service", b.svc.Name, func(reason string) {
+		if middleware.WriteOverload(w, err, b.svc.Name, func(reason string) {
 			observability.OverloadRejectedTotal.WithLabelValues(b.svc.Name, reason).Inc()
 		}) {
 			return
 		}
+
 	}
 
 	defer release()
@@ -274,37 +275,6 @@ func (b *Backend) ReportMetrics() {
 	st := b.guard.Stats()
 	observability.InflightRequests.WithLabelValues(b.svc.Name).Set(float64(st.InFlight))
 	observability.QueueDepth.WithLabelValues(b.svc.Name).Set(float64(st.Queued))
-}
-
-// rejectOverload 把 overload.RejectedError 翻译为HTTP响应
-func rejectOverload(w http.ResponseWriter, err error, role, name string, inc func(reason string)) bool {
-	var rej *overload.RejectedError
-	if !errors.As(err, &rej) {
-		// C2：排队等待超时（ctx 到点）要回 504，不能隐式回 200 空 body。
-		if errors.Is(err, context.DeadlineExceeded) {
-			http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
-			return true
-		}
-		// context.Canceled：客户端已断开，无需回写。
-		slog.Debug("guard_ctx_done", "role", role, "name", name, "err", err)
-		return true
-	}
-
-	if rej.RetryAfter > 0 {
-		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(rej.RetryAfter.Seconds()))))
-	}
-
-	if inc != nil {
-		inc(string(rej.Reason))
-	}
-	slog.Warn("overloaded",
-		"role", role,
-		"name", name,
-		"reason", rej.Reason,
-		"inflight", rej.InFlight)
-
-	http.Error(w, "overload:"+string(rej.Reason), http.StatusServiceUnavailable)
-	return true
 }
 
 // classifyOutcome 判断这次失败记录在谁身上

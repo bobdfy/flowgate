@@ -183,10 +183,9 @@ func (r *Router) dispatch(w http.ResponseWriter, req *http.Request) {
 	// 两层护栏的获取顺序是硬约束：路由级先（外），服务级后（内）
 	release, err := best.guard.Acquire(req.Context())
 	if err != nil {
-		rejectOverload(w, err, "route", best.pattern, func(reason string) {
+		middleware.WriteOverload(w, err, best.pattern, func(reason string) {
 			observability.BulkheadRejectedTotal.WithLabelValues(best.pattern, reason).Inc()
 		})
-		return
 	}
 	defer release()
 
