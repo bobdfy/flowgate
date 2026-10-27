@@ -185,6 +185,13 @@ func main() {
 		),
 	)
 
+	state := gatewayapp.NewState()
+
+	root := http.NewServeMux()
+	root.HandleFunc("/healthz", state.Healthz)
+	root.HandleFunc("/readyz", state.Readyz)
+	root.Handle("/", handler) // 其余全部走原链路
+
 	gatewayapp.StartMetricsReporter(statsCtx, router)
 
 	// H1-a：连接池采样（每秒一次 pool.Stat()）。
@@ -193,7 +200,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           handler,
+		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20,
@@ -203,6 +210,8 @@ func main() {
 		gatewayapp.StartPProf()
 	}
 	gatewayapp.StartMetricsServer(cfg.MetricsAddr)
+
+	state.MarkReady()
 
 	// 在独立 goroutine 里监听，主 goroutine 等待退出信号。
 	go func() {
@@ -217,9 +226,15 @@ func main() {
 	defer stop()
 	<-sigCtx.Done()
 
-	log.Println("收到退出信号，开始优雅关闭 gateway ...")
+	log.Println("收到退出信号，停止接收新流量")
+	state.MarkDraining()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if cfg.DrainDelay > 0 {
+		time.Sleep(cfg.DrainDelay)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("gateway 优雅关闭失败: %v", err)
