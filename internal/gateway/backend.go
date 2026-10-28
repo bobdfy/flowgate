@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bobdfy/flowgate/internal/errorlog"
 	"github.com/bobdfy/flowgate/internal/loadbalance"
 	"github.com/bobdfy/flowgate/internal/middleware"
 	"github.com/bobdfy/flowgate/internal/model"
@@ -163,6 +164,8 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if node == nil {
+		// 所有节点都在熔断里，请求根本没发出去 —— 和普通 503 过载要分开记。
+		errorlog.Set(req.Context(), errorlog.KindCircuit, "no healthy upstream: "+b.svc.Name)
 		http.Error(w, "no healthy upstream", http.StatusServiceUnavailable)
 		slog.Error("no_available_upstream",
 			"service", b.svc.Name,
@@ -176,8 +179,10 @@ func (b *Backend) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			b.settle(lease, origCtx, err, 0)
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
+			errorlog.Set(req.Context(), errorlog.KindTimeout, err.Error())
 			http.Error(w, "Gateway Timeout", http.StatusGatewayTimeout)
 		} else {
+			errorlog.Set(req.Context(), errorlog.KindUpstream, err.Error())
 			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		}
 		slog.Warn("request_failed",

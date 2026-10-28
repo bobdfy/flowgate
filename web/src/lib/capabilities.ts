@@ -17,19 +17,21 @@ const liveCapabilities: Capability[] = [
     label: '管理面配置 API',
     state: 'available',
     detail:
-      '42 个 /api/v1 路由，覆盖服务、节点、路由、发布、租户、Key、AI 配置、用量查询与运行状态。',
+      '43 个 /api/v1 路由，覆盖服务、节点、路由、发布、租户、Key、AI 配置、用量查询、错误窗口与运行状态。',
   },
   {
     key: 'metrics',
     label: '运行指标',
-    state: 'unavailable',
-    detail: 'gateway 在 :9090/metrics 暴露 Prometheus 指标；控制台尚未接入只读 Metrics BFF。',
+    state: 'available',
+    detail:
+      '以只读外链在新标签打开 gateway 的 Prometheus 端点（/metrics，文本格式）；控制台不解析指标，也不做聚合查询。',
   },
   {
     key: 'logs',
-    label: '请求日志',
-    state: 'pending',
-    detail: '后端尚未提供日志持久化与查询 API；当前 access log 只输出到 stdout。',
+    label: '错误请求',
+    state: 'available',
+    detail:
+      'gateway 把失败请求（5xx / 401 / 403 / 429）写入 Redis 窗口（最多 500 条），经 /api/v1/logs/errors 查询；全量 access log 仍只输出到 stdout。',
   },
   {
     key: 'node-health',
@@ -56,8 +58,7 @@ const liveCapabilities: Capability[] = [
 
 /**
  * 演示模式不会访问真实管理面，因此不能继续声称“管理面配置 API 已接入”。
- * 其余运行指标 / 日志 / 健康仍保持未接入或待后端接口；
- * 演示模式下不展示用量列与 TPM 窗口设置，而不是伪造数据。
+ * 演示模式下不展示用量列、TPM 窗口设置与指标外链，而不是伪造数据。
  */
 const mockCapabilities: Capability[] = liveCapabilities.map((capability) => {
   if (capability.key !== 'admin') {

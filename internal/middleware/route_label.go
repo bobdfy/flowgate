@@ -11,6 +11,7 @@ const (
 	LabelUnmatched    = "unmatched"     // 没有任何路由匹配
 	LabelAuthRejected = "auth_rejected" // 鉴权失败，请求根本没进路由
 	LabelRateLimited  = "rate_limited"  // 限流拒绝，同样没进路由
+	LabelOverload     = "overload"      // 实例在途上限拒绝，同样没进路由
 	LabelAI           = "ai"            // AI 路径，后面拼 API 名
 )
 

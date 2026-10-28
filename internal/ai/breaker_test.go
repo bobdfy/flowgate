@@ -39,7 +39,7 @@ func TestBreakerOpensAfterConsecutiveFailures(t *testing.T) {
 func TestBreakerSuccessResetsFailureCount(t *testing.T) {
 	b := newBreaker("p")
 
-	for i := 0; i < breakerFailureThreshold-1; i++ {
+	for range breakerFailureThreshold - 1 {
 		l, _ := b.acquire()
 		l.Done(loadbalance.OutcomeFailure)
 	}
@@ -47,7 +47,7 @@ func TestBreakerSuccessResetsFailureCount(t *testing.T) {
 	l, _ := b.acquire()
 	l.Done(loadbalance.OutcomeSuccess)
 
-	for i := 0; i < breakerFailureThreshold-1; i++ {
+	for range breakerFailureThreshold - 1 {
 		l, _ := b.acquire()
 		l.Done(loadbalance.OutcomeFailure)
 	}
@@ -190,7 +190,8 @@ func TestAcquireBreakerSlotWrites503(t *testing.T) {
 	tripBreaker(h.breakers["p"])
 
 	rec := httptest.NewRecorder()
-	if _, ok := h.acquireBreakerSlot(rec, h.providers["m"]); ok {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	if _, ok := h.acquireBreakerSlot(rec, req, h.providers["m"]); ok {
 		t.Fatal("熔断中应拒绝")
 	}
 	if rec.Code != http.StatusServiceUnavailable {

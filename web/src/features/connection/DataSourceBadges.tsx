@@ -25,7 +25,7 @@ export function DataSourceBadges() {
       <SourceBadge
         label="指标"
         state="unavailable"
-        title="gateway 指标在 :9090/metrics 暴露，控制台尚未接入 Metrics BFF"
+        title="控制台不解析指标；可在侧边栏「运行指标」打开 gateway 的 /metrics"
       />
     </div>
   )

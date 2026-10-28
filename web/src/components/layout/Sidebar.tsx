@@ -1,6 +1,8 @@
 import { Link, NavLink } from 'react-router-dom'
 import {
+  Activity,
   Cable,
+  ExternalLink,
   KeyRound,
   LayoutDashboard,
   Network,
@@ -13,6 +15,7 @@ import {
 } from 'lucide-react'
 import { cx } from '../../lib/cx'
 import { isMockMode } from '../../lib/capabilities'
+import { env } from '../../lib/env'
 import { connectionStatusMeta } from '../../features/connection/status'
 import { useConnection } from '../../features/connection/useConnection'
 
@@ -21,6 +24,8 @@ interface NavItem {
   label: string
   icon: LucideIcon
   end?: boolean
+  /** 外链：新标签打开，不参与路由与高亮。 */
+  external?: boolean
 }
 
 interface NavGroup {
@@ -33,7 +38,18 @@ const navGroups: NavGroup[] = [
     label: '运行',
     items: [
       { to: '/overview', label: '运行总览', icon: LayoutDashboard, end: true },
-      { to: '/observability/logs', label: '请求日志', icon: ScrollText },
+      { to: '/observability/logs', label: '错误请求', icon: ScrollText },
+      // 演示模式没有真实 gateway，指标端点也不存在，不展示这个入口。
+      ...(isMockMode
+        ? []
+        : [
+            {
+              to: env.metricsUrl,
+              label: '运行指标',
+              icon: Activity,
+              external: true,
+            },
+          ]),
     ],
   },
   {
@@ -101,6 +117,38 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
             <div className="nav-group__label">{group.label}</div>
             {group.items.map((item) => {
               const Icon = item.icon
+              const icon = (
+                <span className="nav-link__icon">
+                  <Icon size={17} strokeWidth={1.8} aria-hidden="true" />
+                </span>
+              )
+
+              if (item.external) {
+                return (
+                  <a
+                    key={item.to}
+                    href={item.to}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="nav-link"
+                    aria-label={`${item.label}（新标签打开）`}
+                    title={
+                      collapsed
+                        ? `${item.label}（新标签打开）`
+                        : '在新标签打开 gateway 的 Prometheus 指标端点'
+                    }
+                  >
+                    {icon}
+                    <span className="nav-link__label">{item.label}</span>
+                    <ExternalLink
+                      size={12}
+                      className="nav-link__external"
+                      aria-hidden="true"
+                    />
+                  </a>
+                )
+              }
+
               return (
                 <NavLink
                   key={item.to}
@@ -112,9 +160,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
                     cx('nav-link', isActive && 'nav-link--active')
                   }
                 >
-                  <span className="nav-link__icon">
-                    <Icon size={17} strokeWidth={1.8} aria-hidden="true" />
-                  </span>
+                  {icon}
                   <span className="nav-link__label">{item.label}</span>
                 </NavLink>
               )

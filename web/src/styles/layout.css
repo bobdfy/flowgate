@@ -126,6 +126,13 @@
   text-overflow: ellipsis;
 }
 
+/* 外链标记：提示「点了会离开控制台」，靠右显示。 */
+.nav-link__external {
+  flex: 0 0 auto;
+  margin-left: auto;
+  opacity: 0.55;
+}
+
 .sidebar__footer {
   display: flex;
   align-items: center;
@@ -171,6 +178,7 @@
 .sidebar--collapsed .sidebar__brand-text,
 .sidebar--collapsed .nav-group__label,
 .sidebar--collapsed .nav-link__label,
+.sidebar--collapsed .nav-link__external,
 .sidebar--collapsed .sidebar__footer-text {
   display: none;
 }

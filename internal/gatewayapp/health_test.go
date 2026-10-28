@@ -76,10 +76,10 @@ func TestHealthzAlwaysOK(t *testing.T) {
 
 func TestReadyzStatusTransition(t *testing.T) {
 	cases := []struct {
-		name      string
-		setup     func(*State)
-		wantCode  int
-		wantBody  string
+		name     string
+		setup    func(*State)
+		wantCode int
+		wantBody string
 	}{
 		{"未初始化完成", func(s *State) {}, http.StatusServiceUnavailable, `{"status":"draining"}`},
 		{"正常服务中", func(s *State) { s.MarkReady() }, http.StatusOK, `{"status":"ok"}`},

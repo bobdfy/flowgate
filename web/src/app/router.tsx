@@ -34,7 +34,7 @@ export const router = createBrowserRouter([
           {
             path: 'observability/logs',
             element: <LogsPage />,
-            handle: { crumbs: ['运行', '请求日志'] },
+            handle: { crumbs: ['运行', '错误请求'] },
           },
           {
             path: 'gateway/services',

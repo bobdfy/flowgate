@@ -357,6 +357,13 @@ var (
 		Name: "flowgate_ai_breaker_rejected_total",
 		Help: "AI provider 熔断期间被快速拒绝的请求数",
 	}, []string{"provider"})
+
+	// 错误看板：写入 Redis 失败的条目数（队列满 / Redis 不可用）。
+	// 该指标只增不减，配合错误看板页面的「可能不完整」提示使用。
+	ErrorLogDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "flowgate_errorlog_dropped_total",
+		Help: "写入错误看板时被丢弃的条目数（队列满或 Redis 不可用）",
+	})
 )
 
 func init() {
@@ -406,5 +413,7 @@ func init() {
 		AIModelInflight,
 		AICircuitState,
 		AIBreakerRejected,
+		// 错误看板
+		ErrorLogDroppedTotal,
 	)
 }

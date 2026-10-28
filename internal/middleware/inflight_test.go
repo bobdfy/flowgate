@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/bobdfy/flowgate/internal/errorlog"
 	"github.com/bobdfy/flowgate/internal/observability"
 	"github.com/bobdfy/flowgate/internal/overload"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -35,8 +36,15 @@ func TestInflightRejectsWhenFull(t *testing.T) {
 	}()
 	<-entered // 第一个请求已占住名额
 
+	// 拒绝发生在鉴权与路由之前，没有内层会替它写标签。
+	// 这里手动装持有者（不包 Logging，避免把测试流量写进全局指标），
+	// 断言拒绝路径自己写的是 overload，而不是留空让外层兜底成 unmatched。
+	rejectedReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	rejectedReq = rejectedReq.WithContext(withRouteLabel(rejectedReq.Context()))
+	rejectedReq = rejectedReq.WithContext(errorlog.WithHolder(rejectedReq.Context()))
+
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	h.ServeHTTP(rec, rejectedReq)
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("满员时应快速失败，期望 503，实际 %d", rec.Code)
@@ -47,10 +55,38 @@ func TestInflightRejectsWhenFull(t *testing.T) {
 	if got := served.Load(); got != 1 {
 		t.Fatalf("被拒请求不应进入业务处理，业务函数被调用 %d 次", got)
 	}
+	if got := RouteLabel(rejectedReq.Context()); got != LabelOverload {
+		t.Fatalf("过载拒绝的路由标签应为 %q，实际 %q", LabelOverload, got)
+	}
+	// 错误看板要能看出是过载以及当时的在途数，而不是只有一句「503」。
+	kind, detail, ok := errorlog.Get(rejectedReq.Context())
+	if !ok || kind != errorlog.KindOverload {
+		t.Fatalf("应写入 overload 归因，实际 ok=%v kind=%q", ok, kind)
+	}
+	if !strings.Contains(detail, string(overload.ReasonFailFast)) || !strings.Contains(detail, "inflight") {
+		t.Fatalf("归因 detail 应带原因与在途数，实际 %q", detail)
+	}
 
 	close(unblock)
 	if got := <-first; got.Code != http.StatusOK {
 		t.Fatalf("占着名额的请求应正常完成，实际 %d", got.Code)
+	}
+}
+
+// 放行的请求不能被 inflight 顺手贴上 overload：
+// 它的路由标签由更内层的 Router 决定，提前写死会把真实路由名抹掉。
+func TestInflightDoesNotLabelAcceptedRequests(t *testing.T) {
+	guard := overload.NewGuard(1, overload.StrategyFailFast, 0, 0)
+	h := Inflight(guard, "instance")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(withRouteLabel(req.Context()))
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if got := RouteLabel(req.Context()); got != "" {
+		t.Fatalf("放行的请求不应被 inflight 写标签，实际 %q", got)
 	}
 }
 

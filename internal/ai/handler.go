@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bobdfy/flowgate/internal/errorlog"
 	"github.com/bobdfy/flowgate/internal/identity"
 	"github.com/bobdfy/flowgate/internal/loadbalance"
 	"github.com/bobdfy/flowgate/internal/model"
@@ -273,7 +274,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 5.15 熔断：上游已经确定不可用时，快速拒绝，别把请求压到一个死掉的上游上。
 	// 放在并发名额之前 —— 熔断中的请求不该再占名额，否则排队等名额的请求
 	// 拿到名额后依然是 503，白白拉高了延迟。
-	lease, breakerOK := h.acquireBreakerSlot(w, entry)
+	lease, breakerOK := h.acquireBreakerSlot(w, r, entry)
 	if !breakerOK {
 		return
 	}
@@ -405,6 +406,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		status, errType := classifyUpstreamError(err)
+		kind := errorlog.KindUpstream
+		if status == http.StatusGatewayTimeout {
+			kind = errorlog.KindTimeout
+		}
+		// detail 会截断到 200 字符：错误原文可能带上游 URL 或响应片段。
+		errorlog.Set(r.Context(), kind, err.Error())
 		slog.Error("ai_forward_failed",
 			"model", req.Model, "provider", entry.Name,
 			"api", string(apiName), "streaming", streaming, "err", err)
@@ -548,6 +555,17 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 		}
 		observability.AIStreamTerminatedTotal.WithLabelValues(reason).Inc()
 		slog.Warn("ai_stream_failed", "model", model, "reason", reason, "err", err)
+
+		// 流式响应这时已经写出 200 了，光看状态码看不出失败 —— 必须显式归因。
+		// 客户端自己走不记（P0-12）：用户主动断开不是错误。
+		switch reason {
+		case "client_cancel":
+			// 不记
+		case "idle_timeout", "max_duration":
+			errorlog.Set(r.Context(), errorlog.KindTimeout, reason+": "+err.Error())
+		default:
+			errorlog.Set(r.Context(), errorlog.KindStream, reason+": "+err.Error())
+		}
 
 		// 只有「上游不说话」和「上游把流截断」算可用性故障。
 		// 客户端自己走、或撞到我们配置的最大时长，都不能怪上游。

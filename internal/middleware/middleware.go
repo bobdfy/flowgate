@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/bobdfy/flowgate/internal/errorlog"
 	"github.com/bobdfy/flowgate/internal/observability"
 )
 
@@ -76,10 +77,25 @@ func methodLabel(m string) string {
 // 直接当标签会让随机 URL 不断造出新的时间序列，把 Prometheus 打爆。
 // 日志里保留原始 path（日志没有基数问题），另加 route 字段便于对照。
 func Logging(next http.Handler) http.Handler {
+	return LoggingWithErrors(nil, "", next)
+}
+
+// LoggingWithErrors 同 Logging，并把失败请求交给 sink（nil = 不记录错误看板）。
+//
+// instance 用于标识条目来自哪个 gateway 实例：多实例共用一个 Redis 列表，
+// 没有这个字段就看不出是哪台出的问题。
+func LoggingWithErrors(sink ErrorSink, instance string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		// 内层（路由 / 鉴权 / 限流 / AI 分流）把命中的有界标签写进这个持有者
 		r = r.WithContext(withRouteLabel(r.Context()))
+		if sink != nil {
+			// 内层可以把「为什么失败」写进这个持有者（熔断 / 流中断 / 超时），
+			// 外层据此归类，而不是只看状态码。
+			r = r.WithContext(errorlog.WithHolder(r.Context()))
+			// 身份同理：鉴权在内层，外层要一个快照才能记下租户与 Key。
+			r = r.WithContext(withIdentityHolder(r.Context()))
+		}
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
 
@@ -88,19 +104,26 @@ func Logging(next http.Handler) http.Handler {
 			route = LabelUnmatched
 		}
 
+		duration := time.Since(start)
+
 		slog.Info("access_log",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"route", route,
 			"status", rec.status,
-			"duration_ms", time.Since(start).Milliseconds(),
+			"duration_ms", duration.Milliseconds(),
 			"request_id", r.Header.Get("X-Request-ID"),
 		)
 
-		duration := time.Since(start)
 		status := strconv.Itoa(rec.status)
 		method := methodLabel(r.Method)
 		observability.RequestDuration.WithLabelValues(method, route, status).Observe(duration.Seconds())
 		observability.RequestTotal.WithLabelValues(method, route, status).Inc()
+
+		if sink != nil {
+			if entry, ok := buildErrorEntry(instance, r, rec.status, route, duration); ok {
+				sink.Record(entry)
+			}
+		}
 	})
 }

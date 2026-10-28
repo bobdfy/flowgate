@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bobdfy/flowgate/internal/errorlog"
 	"github.com/bobdfy/flowgate/internal/loadbalance"
 	"github.com/bobdfy/flowgate/internal/observability"
 )
@@ -215,7 +216,7 @@ func (h *Handler) breakerFor(entry *ProviderEntry) *breaker {
 // acquireBreakerSlot 在发往上游之前申请放行。被熔断时自己写好 503，返回 ok=false。
 //
 // 放在模型并发名额之前：上游已经确定挂了，没必要再占一个名额再退还。
-func (h *Handler) acquireBreakerSlot(w http.ResponseWriter, entry *ProviderEntry) (*breakerLease, bool) {
+func (h *Handler) acquireBreakerSlot(w http.ResponseWriter, r *http.Request, entry *ProviderEntry) (*breakerLease, bool) {
 	b := h.breakerFor(entry)
 	if b == nil {
 		return nil, true
@@ -225,6 +226,9 @@ func (h *Handler) acquireBreakerSlot(w http.ResponseWriter, entry *ProviderEntry
 	if !ok {
 		observability.AIBreakerRejected.WithLabelValues(b.provider).Inc()
 		slog.Warn("ai_breaker_rejected", "provider", b.provider)
+		// 这一条不是过载、也不是上游 5xx，而是「请求根本没发出去」——
+		// 错误看板必须能把它和普通 503 区分开。
+		errorlog.Set(r.Context(), errorlog.KindCircuit, "provider "+b.provider+" 熔断中")
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusServiceUnavailable, ErrTypeUpstream,
 			fmt.Sprintf("上游 %s 暂时不可用（熔断中），请稍后重试", b.provider))
