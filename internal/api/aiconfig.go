@@ -155,6 +155,11 @@ func (h *Handler) CreateAIModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 新建默认启用；Update 那边不填就保持原值，默认值只在这里给。
+	if req.Enabled == nil {
+		enabled := true
+		req.Enabled = &enabled
+	}
 	m := model.AIModel{}
 	if err := applyAIModelRequest(&m, req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -187,20 +192,31 @@ func (h *Handler) UpdateAIModel(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Name = name
 
-	m := model.AIModel{}
-	if err := applyAIModelRequest(&m, req); err != nil {
+	// 先读旧记录再合并：请求里没带的字段保持原值。
+	// 直接拿零值 model.AIModel 去覆盖，会把 max_concurrency 写成 0（= 不限）——
+	// 控制台表单就没有这个字段，等于每编辑一次模型，就悄悄取消一次并发上限。
+	existing, err := h.aiconfig.GetModelByName(r.Context(), name)
+	if err != nil {
+		writeAIStoreError(w, err)
+		return
+	}
+	if existing == nil {
+		writeError(w, http.StatusNotFound, "ai model not found")
+		return
+	}
+	if err := applyAIModelRequest(existing, req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := h.ensureAIProvider(r.Context(), m.ProviderName); err != nil {
+	if err := h.ensureAIProvider(r.Context(), existing.ProviderName); err != nil {
 		writeAIStoreError(w, err)
 		return
 	}
-	if err := h.aiconfig.UpdateModel(r.Context(), &m); err != nil {
+	if err := h.aiconfig.UpdateModel(r.Context(), existing); err != nil {
 		writeAIStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, m)
+	writeJSON(w, http.StatusOK, existing)
 }
 
 // DeleteAIModel 处理 DELETE /api/v1/ai/models/{name}
@@ -288,8 +304,13 @@ func applyAIModelRequest(m *model.AIModel, req aiModelRequest) error {
 
 	m.Name = name
 	m.ProviderName = provider
+	// 空串是合法值，含义是「与别名相同」，所以这里保持全量覆盖。
 	m.UpstreamModel = strings.TrimSpace(req.UpstreamModel)
-	m.Enabled = req.Enabled == nil || *req.Enabled
+	// enabled 不传就不动：新建路径在调用前已经把 nil 填成 true，
+	// 走到这里的 nil 只可能来自 Update，语义就是「保持原值」。
+	if req.Enabled != nil {
+		m.Enabled = *req.Enabled
+	}
 	return nil
 }
 

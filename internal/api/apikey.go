@@ -107,10 +107,27 @@ func (h *Handler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	k.ID = id
-	// S8：status 只允许 active / disabled，空则回填 active，避免写入脏数据。
-	if k.Status == "" {
-		k.Status = "active"
+
+	// 先读旧记录再合并。PUT 是全量覆盖语义，而结构体分不出「没传」和
+	// 「传了零值」：不合并的话，只改 name 的一次 PUT 会把 qps_limit 打回默认的
+	// 100、把 expires_at 清成永不过期、把 status 重新启用。
+	existing, err := h.apikeys.GetByID(r.Context(), id)
+	if err != nil {
+		log.Println("get api key failed", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
+		return
 	}
+	if existing == nil {
+		writeError(w, http.StatusNotFound, "api key not found")
+		return
+	}
+
+	// allowed_models 在合并前先记下「这次到底带没带」：
+	// 带空数组 [] 表示清空限制，是显式意图，不能被合并逻辑吃回去。
+	modelsProvided := k.AllowedModels != nil
+	mergeAPIKeyUpdate(&k, existing)
+
+	// S8：status 只允许 active / disabled（合并后仍为空说明旧记录也是脏数据）。
 	if k.Status != "active" && k.Status != "disabled" {
 		writeError(w, http.StatusBadRequest, "status must be active or disabled")
 		return
@@ -120,22 +137,7 @@ func (h *Handler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// allowed_models 按需更新：
-	//   nil（请求里没带）→ 保留原值，避免老客户端一次 PUT 把限制清空；
-	//   []（显式空数组）→ 清空限制。
-	if k.AllowedModels == nil {
-		existing, gerr := h.apikeys.GetByID(r.Context(), id)
-		if gerr != nil {
-			log.Println("get api key failed", gerr)
-			writeError(w, http.StatusInternalServerError, "internal server error")
-			return
-		}
-		if existing == nil {
-			writeError(w, http.StatusNotFound, "api key not found")
-			return
-		}
-		k.AllowedModels = existing.AllowedModels
-	} else {
+	if modelsProvided {
 		allowed, aerr := h.normalizeAllowedModels(r.Context(), k.AllowedModels)
 		if aerr != nil {
 			writeError(w, http.StatusBadRequest, aerr.Error())
@@ -150,6 +152,30 @@ func (h *Handler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, k)
+}
+
+// mergeAPIKeyUpdate 把「请求里没带的字段」补成旧值，只保留调用方显式传了的。
+//
+// 判定「没带」用零值：name 空串、status 空串、qps_limit<=0、expires_at nil
+// 在业务上都没有意义，不可能是有意设置的值。
+// allowed_models 例外：它的零值是 nil（没带）而 [] 是显式清空，
+// 调用方要在合并前自己判断，这里只在 nil 时补旧值。
+func mergeAPIKeyUpdate(k, existing *model.APIKey) {
+	if strings.TrimSpace(k.Name) == "" {
+		k.Name = existing.Name
+	}
+	if k.Status == "" {
+		k.Status = existing.Status
+	}
+	if k.QPSLimit <= 0 {
+		k.QPSLimit = existing.QPSLimit
+	}
+	if k.ExpiresAt == nil {
+		k.ExpiresAt = existing.ExpiresAt
+	}
+	if k.AllowedModels == nil {
+		k.AllowedModels = existing.AllowedModels
+	}
 }
 
 // DeleteAPIKey 处理 DELETE /api/v1/keys/{id}

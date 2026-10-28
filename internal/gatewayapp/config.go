@@ -22,7 +22,8 @@ type Config struct {
 	TPMFailMode  string        // TPM在redis故障时的策略： closed/open/fallback
 	AuthCacheTTL time.Duration // 鉴权结果进程内缓存 TTL（>0 启用；0 关闭）
 	TPMWindow    time.Duration // TPM 配额窗口长度（如 1m / 5m / 1h）
-	PProf        bool          // 启用 pprof 调试端点（固定 127.0.0.1:6060）
+	PProf        bool          // 启用 pprof 调试端点
+	PProfAddr    string        // pprof 监听地址（默认仅本机）
 	MetricsAddr  string        // Prometheus 指标监听地址（默认仅本机）
 
 	AllowUpstreamCIDRs string // 允许拨号的内网网段（逗号分隔）。默认为空等于「内网上游全部封死」，本地联调时必须显式写进来。
@@ -56,7 +57,12 @@ func ParseFlags() *Config {
 
 	flag.DurationVar(&c.TPMWindow, "tpm-window", time.Minute, "TPM 配额窗口长度（如 1m / 5m / 1h）")
 
-	flag.BoolVar(&c.PProf, "pprof", false, "启用 pprof 调试端点(默认关闭, 仅 127.0.0.1)")
+	flag.BoolVar(&c.PProf, "pprof", false, "启用 pprof 调试端点(默认关闭)")
+
+	// 和 metrics 一样分两个参数：开关是开关，地址是地址。
+	// 默认绑回环；容器里必须显式给 0.0.0.0 才能被端口映射到，
+	// 此时安全性由宿主机侧的 127.0.0.1:6060 端口绑定保证。
+	flag.StringVar(&c.PProfAddr, "pprof-addr", "127.0.0.1:6060", "pprof 监听地址（默认仅本机）")
 
 	flag.StringVar(&c.MetricsAddr, "metrics-addr", "127.0.0.1:9090", "Prometheus 指标监听地址（默认仅本机）")
 

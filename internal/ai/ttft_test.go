@@ -67,7 +67,53 @@ func TestStreamUsageRecordsOnlyFirstEvent(t *testing.T) {
 	}
 }
 
-// 端到端口径：ctx 里的起点设在 200ms 前，上游立刻吐一帧，
+// 首帧（role-only）、usage 帧、[DONE] 都不算首 token。
+// 只有 delta.content / delta.reasoning_content 出现时，用户才算真的看到了东西。
+func TestEventHasContent(t *testing.T) {
+	cases := []struct {
+		name  string
+		event string
+		want  bool
+	}{
+		{"正文", `data: {"choices":[{"delta":{"content":"a"}}]}`, true},
+		{"推理正文", `data: {"choices":[{"delta":{"reasoning_content":"想"}}]}`, true},
+		{"角色帧", `data: {"choices":[{"delta":{"role":"assistant"}}]}`, false},
+		{"空 delta", `data: {"choices":[{"delta":{}}]}`, false},
+		{"空 choices", `data: {"choices":[]}`, false},
+		{"纯 usage", `data: {"choices":[],"usage":{"total_tokens":9}}`, false},
+		{"[DONE]", `data: [DONE]`, false},
+		{"非 JSON", `data: not-json`, false},
+		{"空事件", "", false},
+	}
+	for _, c := range cases {
+		if got := eventHasContent([]byte(c.event)); got != c.want {
+			t.Errorf("%s: eventHasContent=%v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// 上游先发 role 帧、隔一段时间才发正文：TTFT 应该只由正文帧决定。
+func TestSinkStartsTTFTOnlyOnContent(t *testing.T) {
+	u := newStreamUsage([]byte(`{}`), false)
+	sink := u.sink()
+
+	sink([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"), false)
+	if !u.firstEventAt.IsZero() {
+		t.Fatalf("role 帧不该停表，实际记成了 %v", u.firstEventAt)
+	}
+
+	time.Sleep(30 * time.Millisecond)
+	start := time.Now()
+	sink([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"), false)
+	if u.firstEventAt.IsZero() {
+		t.Fatal("正文帧到达后应当停表")
+	}
+	if u.firstEventAt.Before(start) {
+		t.Fatalf("停表时刻 %v 早于正文帧到达时刻 %v", u.firstEventAt, start)
+	}
+}
+
+// 端到端口径：ctx 里的起点设在 200ms 前，上游立刻吐一帧带正文的事件，
 // 那么这次观测到的 TTFT 应该接近 200ms 而不是接近 0。
 func TestStreamProxyTTFTIncludesQueueTime(t *testing.T) {
 	const model = "ttft-queue-fixture"
@@ -77,7 +123,7 @@ func TestStreamProxyTTFTIncludesQueueTime(t *testing.T) {
 	req = req.WithContext(context.WithValue(req.Context(), ttftStartKey{},
 		time.Now().Add(-200*time.Millisecond)))
 
-	upstream := io.NopCloser(strings.NewReader("data: {\"choices\":[]}\n\n"))
+	upstream := io.NopCloser(strings.NewReader(`data: {"choices":[{"delta":{"content":"x"}}]}` + "\n\n"))
 	if err := streamProxy(httptest.NewRecorder(), req, upstream,
 		func(event []byte, isLast bool) []byte { return event }, model); err != nil {
 		t.Fatalf("转发失败: %v", err)
@@ -92,12 +138,33 @@ func TestStreamProxyTTFTIncludesQueueTime(t *testing.T) {
 	}
 }
 
+// 上游只发了 role 帧就结束（例如立刻被截断）：没有正文就不该产生 TTFT 样本，
+// 否则「没有任何输出」的请求会以极小的 TTFT 混进 p50。
+func TestStreamProxyNoTTFTForRoleOnlyStream(t *testing.T) {
+	const model = "ttft-role-only-fixture"
+	before := histogramSum(t, model)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ttftStartKey{}, time.Now()))
+
+	upstream := io.NopCloser(strings.NewReader(
+		"data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+	if err := streamProxy(httptest.NewRecorder(), req, upstream,
+		func(event []byte, isLast bool) []byte { return event }, model); err != nil {
+		t.Fatalf("转发失败: %v", err)
+	}
+
+	if delta := histogramSum(t, model) - before; delta != 0 {
+		t.Fatalf("没有正文的流不该记 TTFT，实际记了 %.3fs", delta)
+	}
+}
+
 // serveStream 负责把首帧时刻换算成毫秒写进用量流水。
 func TestServeStreamFillsTTFT(t *testing.T) {
 	h := NewHandler(nil, NewClients(nil, DefaultTimeouts()))
 	h.SetStreamingForwarder(func(w http.ResponseWriter, r *http.Request, up io.ReadCloser, sink StreamEventSink, model string) error {
 		time.Sleep(30 * time.Millisecond)
-		sink([]byte("data: {}\n\n"), false)
+		sink([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"), false)
 		return nil
 	})
 
@@ -136,7 +203,9 @@ func TestServeStreamLeavesTTFTZero(t *testing.T) {
 			h := NewHandler(nil, NewClients(nil, DefaultTimeouts()))
 			h.SetStreamingForwarder(func(w http.ResponseWriter, r *http.Request, up io.ReadCloser, sink StreamEventSink, model string) error {
 				if tc.emitEvent {
-					sink([]byte("data: {}\n\n"), false)
+					// 用带正文的帧：确保 0 值只可能来自「没有起点」，
+					// 而不是恰好被「没有正文」这个原因掩盖过去。
+					sink([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n"), false)
 				}
 				return nil
 			})

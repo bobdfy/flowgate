@@ -73,19 +73,65 @@ func TestApplyAIProviderRequest(t *testing.T) {
 	}
 }
 
+// applyAIModelRequest 是 Create 和 Update 共用的，所以它不能自己补 enabled 默认值：
+// 那样 PUT 不带 enabled 就会把已停用的模型重新启用。
+// 「新建默认启用」由 CreateAIModel 在调用前填指针完成。
 func TestApplyAIModelRequest(t *testing.T) {
 	cases := []struct {
 		name    string
 		req     aiModelRequest
+		base    model.AIModel // 模拟 Update 读到的旧记录
 		wantErr string
 		check   func(t *testing.T, m model.AIModel)
 	}{
 		{
-			name: "合法配置",
+			name: "不带 enabled 时保持原值",
 			req:  aiModelRequest{Name: "flowgate-chat", ProviderName: "zhipu", UpstreamModel: "glm-5.3"},
+			base: model.AIModel{Enabled: true},
 			check: func(t *testing.T, m model.AIModel) {
 				if !m.Enabled {
-					t.Fatal("enabled 默认应为 true")
+					t.Fatal("请求没带 enabled，不该把已启用的模型停掉")
+				}
+			},
+		},
+		{
+			name: "不带 enabled 时不会重新启用已停用的模型",
+			req:  aiModelRequest{Name: "flowgate-chat", ProviderName: "zhipu"},
+			base: model.AIModel{Enabled: false},
+			check: func(t *testing.T, m model.AIModel) {
+				if m.Enabled {
+					t.Fatal("请求没带 enabled，不该把已停用的模型重新启用")
+				}
+			},
+		},
+		{
+			name: "显式停用",
+			req:  aiModelRequest{Name: "flowgate-chat", ProviderName: "zhipu", Enabled: boolPtr(false)},
+			base: model.AIModel{Enabled: true},
+			check: func(t *testing.T, m model.AIModel) {
+				if m.Enabled {
+					t.Fatal("显式 false 应当生效")
+				}
+			},
+		},
+		{
+			name: "不带 max_concurrency 时保持原值",
+			req:  aiModelRequest{Name: "flowgate-chat", ProviderName: "zhipu"},
+			base: model.AIModel{MaxConcurrency: 8, Enabled: true},
+			check: func(t *testing.T, m model.AIModel) {
+				// 控制台表单里没有这个字段，一次普通编辑不该悄悄取消并发上限。
+				if m.MaxConcurrency != 8 {
+					t.Fatalf("max_concurrency = %d, want 8", m.MaxConcurrency)
+				}
+			},
+		},
+		{
+			name: "显式 0 表示不限并发",
+			req:  aiModelRequest{Name: "flowgate-chat", ProviderName: "zhipu", MaxConcurrency: intPtr(0)},
+			base: model.AIModel{MaxConcurrency: 8},
+			check: func(t *testing.T, m model.AIModel) {
+				if m.MaxConcurrency != 0 {
+					t.Fatalf("max_concurrency = %d, want 0", m.MaxConcurrency)
 				}
 			},
 		},
@@ -105,7 +151,7 @@ func TestApplyAIModelRequest(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			var m model.AIModel
+			m := c.base
 			err := applyAIModelRequest(&m, c.req)
 			if c.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
@@ -124,3 +170,5 @@ func TestApplyAIModelRequest(t *testing.T) {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+func intPtr(v int) *int { return &v }

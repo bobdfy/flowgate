@@ -118,7 +118,7 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 		entries = append(entries, &routeEntry{
 			host:      route.Host,
 			pattern:   route.PathPattern,
-			matchType: route.PathMatchType,
+			matchType: normalizePathMatchType(route.PathMatchType),
 			methods:   parseMethods(route.Methods),
 			backend:   backend,
 
@@ -216,14 +216,26 @@ func (e *routeEntry) moreSpecific(other *routeEntry) bool {
 	return len(e.pattern) > len(other.pattern)
 }
 
+// normalizePathMatchType 把匹配类型归一成小写。
+//
+// 写接口已经会校验，但库里可能留着历史数据（"Exact" / " EXACT "）。
+// 匹配只看 e.matchType == "exact"，不归一化的话这些路由会被静默降级成前缀匹配。
+// 每条路由只在建表时算一次，不进热路径。
+func normalizePathMatchType(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
 // parseMethods 把 "GET,POST" 拆成集合；空串返回 nil（不限）。
+//
+// 统一转大写：req.Method 永远是规范大写形式，而 methods 是人工录入的字符串。
+// 老快照里可能存着 "get"，不归一化就等于那条路由永不命中。
 func parseMethods(s string) map[string]bool {
 	if strings.TrimSpace(s) == "" {
 		return nil
 	}
 	m := map[string]bool{}
 	for part := range strings.SplitSeq(s, ",") {
-		if p := strings.TrimSpace(part); p != "" {
+		if p := strings.ToUpper(strings.TrimSpace(part)); p != "" {
 			m[p] = true
 		}
 	}

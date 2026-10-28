@@ -130,10 +130,13 @@ func main() {
 		}
 	}
 
+	// 请求体上限：管理接口的 body 只有几 KB，1 MiB 已经很宽松。
+	// 放在鉴权之内：未通过鉴权的请求连读 body 的机会都不该有。
+	var handler http.Handler = middleware.LimitBody(middleware.DefaultMaxBodyBytes, mux)
+
 	// 控制面有增删改 / publish / 返回明文 key 的权限，必须鉴权。
-	var handler http.Handler = mux
 	if *adminKey != "" {
-		handler = adminui.RequireAdminKey(*adminKey, mux, *webDir != "")
+		handler = adminui.RequireAdminKey(*adminKey, handler, *webDir != "")
 	}
 
 	srv := &http.Server{

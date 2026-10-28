@@ -221,7 +221,7 @@ func main() {
 	}
 
 	if cfg.PProf {
-		gatewayapp.StartPProf()
+		gatewayapp.StartPProf(cfg.PProfAddr)
 	}
 	gatewayapp.StartMetricsServer(cfg.MetricsAddr)
 

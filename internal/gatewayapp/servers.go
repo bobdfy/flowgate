@@ -55,14 +55,21 @@ func StartMetricsServer(addr string) {
 	}()
 }
 
-// StartPProf 启动 pprof 调试端点（固定 127.0.0.1:6060）。
-// 会暴露堆栈、goroutine 和内存布局，只在排障时临时开启。
-func StartPProf() {
-	slog.Warn("pprof_enabled", "addr", "127.0.0.1:6060",
+// StartPProf 启动 pprof 调试端点。
+//
+// 默认绑回环（见 -pprof-addr）。容器里必须监听 0.0.0.0 才能被端口映射到，
+// 此时和 metrics 同样打一条告警：安全性由宿主机侧的 127.0.0.1 端口绑定保证。
+// 会暴露堆栈、goroutine 和内存布局，只在排障时开启。
+func StartPProf(addr string) {
+	slog.Warn("pprof_enabled", "addr", addr,
 		"hint", "调试端点会暴露堆栈、goroutine 和内存布局，用完请关闭")
+	if !middleware.IsLoopbackAddr(addr) {
+		slog.Warn("pprof_exposed", "addr", addr,
+			"hint", "pprof 监听在非回环地址，宿主机侧必须只映射到 127.0.0.1")
+	}
 	go func() {
-		log.Println("pprof listen 127.0.0.1:6060")
-		if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
+		log.Println("pprof listening on", addr)
+		if err := http.ListenAndServe(addr, nil); err != nil {
 			Fatal("%v", err)
 		}
 	}()

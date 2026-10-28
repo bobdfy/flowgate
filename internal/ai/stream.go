@@ -36,11 +36,22 @@ func streamProxy(w http.ResponseWriter, r *http.Request, upstream io.ReadCloser,
 	firstEventAt := time.Time{}
 	totalEvents := 0
 
+	// markFirstContent 只在帧里真的有正文时才停表。
+	// 上游首帧普遍是 {"delta":{"role":"assistant"}}，拿它当首 token
+	// 会让 TTFT 少算 1~2 帧的网络与解码时间。
+	markFirstContent := func(event []byte) {
+		if firstEventAt.IsZero() && eventHasContent(event) {
+			firstEventAt = time.Now()
+		}
+	}
+
 	buf := make([]byte, streamBufSize)
 	for {
 		n, err := upstream.Read(buf)
 		if n > 0 {
 			for _, event := range framer.Frame(buf[:n]) {
+				// 先打点再写：写失败时这一帧也已经产出给客户端了。
+				markFirstContent(event)
 				if werr := writeEvent(rc, w, event, false, sink, &totalEvents); werr != nil {
 					slog.Info("stream_client_gone",
 						"err", werr,
@@ -48,20 +59,15 @@ func streamProxy(w http.ResponseWriter, r *http.Request, upstream io.ReadCloser,
 						"duration_ms", time.Since(start).Milliseconds())
 					return werr
 				}
-				if firstEventAt.IsZero() {
-					firstEventAt = time.Now()
-				}
 			}
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				if tail := framer.Flush(); len(tail) > 0 {
+					markFirstContent(tail)
 					if werr := writeEvent(rc, w, tail, true, sink, &totalEvents); werr != nil {
 
 						return werr
-					}
-					if firstEventAt.IsZero() {
-						firstEventAt = time.Now()
 					}
 				}
 				break

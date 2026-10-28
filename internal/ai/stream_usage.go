@@ -15,7 +15,7 @@ type streamUsage struct {
 	seen             bool
 	stripUsage       bool // 网关替客户端要的 usage：不发给客户端
 
-	firstEventAt time.Time // 首个 SSE 事件到达时刻，用于TTFT
+	firstEventAt time.Time // 首个带正文的帧到达时刻，用于 TTFT
 }
 
 func newStreamUsage(body []byte, stripUsage bool) *streamUsage {
@@ -25,15 +25,70 @@ func newStreamUsage(body []byte, stripUsage bool) *streamUsage {
 	}
 }
 
+// sseChunk 是流式事件里我们关心的字段。
+type sseChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+		} `json:"delta"`
+	} `json:"choices"`
+	Usage *Usage `json:"usage"`
+}
+
+// hasContent 报告这一帧是否带了用户可见的正文。
+//
+// 上游首帧通常只有 {"delta":{"role":"assistant"}}，正文要晚一两帧才到；
+// 把「首帧到达」当首 token 会让 TTFT 系统性偏乐观。
+// reasoning_content 也算：对推理模型来说，那是客户端第一个能看到的东西。
+func (c sseChunk) hasContent() bool {
+	for _, ch := range c.Choices {
+		if ch.Delta.Content != "" || ch.Delta.ReasoningContent != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// parseChunk 解析一个 SSE 事件；data 为空或不是合法 JSON 时 ok=false。
+func parseChunk(event []byte) (sseChunk, bool) {
+	payload := ssePayload(event)
+	if len(payload) == 0 {
+		return sseChunk{}, false
+	}
+	var c sseChunk
+	if err := json.Unmarshal(payload, &c); err != nil {
+		return sseChunk{}, false
+	}
+	return c, true
+}
+
+// eventHasContent 是给转发器用的轻量判断：只看这一帧有没有正文。
+// 转发器不持有 streamUsage（它是通用的），所以这里独立解析一次。
+func eventHasContent(event []byte) bool {
+	c, ok := parseChunk(event)
+	return ok && c.hasContent()
+}
+
+// eventResult 是解析一帧后的结论。
+type eventResult struct {
+	hasContent bool // delta 里有正文
+	usageOnly  bool // 只有 usage、没有 choices（可被吞掉）
+}
+
 // sink 返回给 StreamingForwarder 的钩子：读事件做统计，必要时吞掉 usage 帧。
 func (u *streamUsage) sink() StreamEventSink {
 	return func(event []byte, isLast bool) []byte {
-		if u.firstEventAt.IsZero() {
+		st := u.observe(event)
+
+		// ★ 只有带正文的帧才算「首 token」。
+		// 之前在解析之前就打点，首帧（role-only）一到 TTFT 就停表，
+		// 报出来的数字比用户真实体感快 1~2 帧。
+		if st.hasContent && u.firstEventAt.IsZero() {
 			u.firstEventAt = time.Now()
 		}
 
-		usageOnly := u.observe(event)
-		if usageOnly && u.stripUsage && !isLast {
+		if st.usageOnly && u.stripUsage && !isLast {
 			return nil // writeEvent 会跳过 nil 事件
 		}
 		return event
@@ -41,35 +96,25 @@ func (u *streamUsage) sink() StreamEventSink {
 }
 
 // observe 解析一个 SSE 事件: 累加 delta 内容，有 usage 就记录。
-// 返回 true 表示这是只有 usage 的帧（choices 为空），供上层决定要不要吞掉。
-func (u *streamUsage) observe(event []byte) bool {
-	payload := ssePayload(event)
-	if len(payload) == 0 {
-		return false
+func (u *streamUsage) observe(event []byte) eventResult {
+	c, ok := parseChunk(event)
+	if !ok {
+		return eventResult{}
 	}
-	var chunk struct {
-		Choices []struct {
-			Delta struct {
-				Content          string `json:"content"`
-				ReasoningContent string `json:"reasoning_content"`
-			} `json:"delta"`
-		} `json:"choices"`
-		Usage *Usage `json:"usage"`
-	}
-	if err := json.Unmarshal(payload, &chunk); err != nil {
-		return false
-	}
-	for _, c := range chunk.Choices {
-		u.completionBytes += int64(len(c.Delta.Content) + len(c.Delta.ReasoningContent))
+	for _, ch := range c.Choices {
+		u.completionBytes += int64(len(ch.Delta.Content) + len(ch.Delta.ReasoningContent))
 	}
 	// usage 在最后一帧，中间帧可能是 "usage":null —— 所以用指针
-	if chunk.Usage != nil && chunk.Usage.TotalTokens > 0 {
-		u.total = int64(chunk.Usage.TotalTokens)
-		u.promptActual = int64(chunk.Usage.PromptTokens)
-		u.completionActual = int64(chunk.Usage.CompletionTokens)
+	if c.Usage != nil && c.Usage.TotalTokens > 0 {
+		u.total = int64(c.Usage.TotalTokens)
+		u.promptActual = int64(c.Usage.PromptTokens)
+		u.completionActual = int64(c.Usage.CompletionTokens)
 		u.seen = true
 	}
-	return chunk.Usage != nil && len(chunk.Choices) == 0
+	return eventResult{
+		hasContent: c.hasContent(),
+		usageOnly:  c.Usage != nil && len(c.Choices) == 0,
+	}
 }
 
 // prompt 返回 prompt token 数：上游给了就用真实值，否则用请求体估算。

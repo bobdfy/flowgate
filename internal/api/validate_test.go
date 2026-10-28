@@ -250,6 +250,76 @@ func TestValidateRouteForWrite(t *testing.T) {
 	}
 }
 
+// TestValidateRouteNormalizesMatchType 回归「大小写不一致导致静默降级」：
+// 路由匹配只看 matchType == "exact"，写 "Exact" 会被当成前缀匹配，
+// 配置看起来一切正常，只是这条精确路由在悄悄兜住所有子路径。
+func TestValidateRouteNormalizesMatchType(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "prefix", false}, // 不传 → 与表默认值一致
+		{"prefix", "prefix", false},
+		{"PREFIX", "prefix", false},
+		{" exact ", "exact", false},
+		{"Exact", "exact", false},
+		{"regex", "", true}, // 不支持的类型必须报错，不能静默当 prefix
+	}
+	for _, c := range cases {
+		r := model.Route{Name: "r", ServiceID: 1, PathPattern: "/api", PathMatchType: c.in}
+		err := validateRouteForWrite(&r)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("path_match_type=%q 应被拒", c.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("path_match_type=%q 不应报错: %v", c.in, err)
+			continue
+		}
+		if r.PathMatchType != c.want {
+			t.Errorf("path_match_type=%q → %q，期望 %q", c.in, r.PathMatchType, c.want)
+		}
+	}
+}
+
+// TestValidateRouteNormalizesMethods 回归两件事：
+//  1. req.Method 永远大写，"get" 存进去等于永不命中；
+//  2. 大小写/空白/顺序不同的同一组方法，重复路由判定必须认为是同一条。
+func TestValidateRouteNormalizesMethods(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "", false},
+		{"GET,POST", "GET,POST", false},
+		{"get, post", "GET,POST", false},
+		{"POST,GET", "GET,POST", false}, // 排序让「同一组方法」有唯一表示
+		{"get,,get", "GET", false},      // 去空白 + 去重
+		{"GET, GTE", "", true},          // 拼错的方法必须报错
+	}
+	for _, c := range cases {
+		r := model.Route{Name: "r", ServiceID: 1, PathPattern: "/api", Methods: c.in}
+		err := validateRouteForWrite(&r)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("methods=%q 应被拒", c.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("methods=%q 不应报错: %v", c.in, err)
+			continue
+		}
+		if r.Methods != c.want {
+			t.Errorf("methods=%q → %q，期望 %q", c.in, r.Methods, c.want)
+		}
+	}
+}
+
 // TestValidateServiceForWrite 兼顾两件事：name 必填、治理参数零值兜底。
 // applyServiceDefaults 的语义是"0 表示用默认值"，所以 Update 也必须走，
 // 否则一次 PUT 就能把 cb_failure_threshold 写成 0（= 第一次失败就熔断）。

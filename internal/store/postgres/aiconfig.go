@@ -279,6 +279,24 @@ func (s *AIConfigStore) ListModels(ctx context.Context) ([]model.AIModel, error)
 	return out, rows.Err()
 }
 
+// GetModelByName 按别名取模型；不存在返回 (nil, nil)。
+//
+// Update 路径必须先读旧记录：请求里没带的字段（如 max_concurrency）
+// 不能当成「改成零值」写回去，否则一次不完整的 PUT 就会把并发上限清成「不限」。
+func (s *AIConfigStore) GetModelByName(ctx context.Context, name string) (*model.AIModel, error) {
+	var m model.AIModel
+	err := s.pool.QueryRow(ctx, `SELECT `+aiModelCols+` FROM ai_models WHERE name=$1`, name).
+		Scan(&m.Name, &m.ProviderName, &m.UpstreamModel, &m.MaxConcurrency,
+			&m.Enabled, &m.CreatedAt, &m.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get ai model (name=%s) failed: %w", name, err)
+	}
+	return &m, nil
+}
+
 // CreateModel 插入一个模型别名并 bump 版本号。
 func (s *AIConfigStore) CreateModel(ctx context.Context, m *model.AIModel) error {
 	return s.write(ctx, func(tx pgx.Tx) error {

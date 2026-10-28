@@ -3,7 +3,10 @@ package api
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
+	"sort"
+	"strings"
 
 	"github.com/bobdfy/flowgate/internal/model"
 	"github.com/bobdfy/flowgate/internal/netguard"
@@ -121,6 +124,12 @@ func validateTenantForWrite(t *model.Tenant) error {
 // service_id 为什么要校验：store 层的 Update SQL 原先根本不更新 service_id
 // （SET 子句里漏了这一列），改了 service_id 返回 200 但库里纹丝不动。
 // 这里把它变成显式必填，配合 store 层补上的 service_id 列，语义才闭环。
+//
+// ★ path_match_type 和 methods 在这里归一化，因为它们是「字符串直接进匹配逻辑」的字段：
+//   - match_type 只有 "exact" 会走精确匹配，写成 "Exact" 会被静默当成前缀匹配；
+//   - methods 与 req.Method（永远大写）逐字比较，写 "get" 等于这条路由永不命中。
+//   - 两者还参与重复路由判定（FindDuplicateByPattern），大小写不统一会让
+//     「同一条规则」被当成两条，于是能建出互相遮蔽的路由。
 func validateRouteForWrite(route *model.Route) error {
 	if route.Name == "" {
 		return fmt.Errorf("name is required")
@@ -131,7 +140,65 @@ func validateRouteForWrite(route *model.Route) error {
 	if route.PathPattern == "" {
 		return fmt.Errorf("path_pattern is required")
 	}
+
+	matchType, err := normalizePathMatchType(route.PathMatchType)
+	if err != nil {
+		return err
+	}
+	route.PathMatchType = matchType
+
+	methods, err := normalizeRouteMethods(route.Methods)
+	if err != nil {
+		return err
+	}
+	route.Methods = methods
 	return nil
+}
+
+// normalizePathMatchType 把匹配类型归一成 "prefix" / "exact"。
+// 空值取默认 prefix（与表默认值一致）。
+func normalizePathMatchType(s string) (string, error) {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case "":
+		return "prefix", nil
+	case "prefix", "exact":
+		return v, nil
+	default:
+		return "", fmt.Errorf("path_match_type must be prefix or exact")
+	}
+}
+
+// allowedRouteMethods 是路由允许限定的 HTTP 方法集合。
+// 用白名单而不是「任意 token」：methods 写错（"GTE"）不会报错，
+// 只会让这条路由永远匹配不到，属于最难排查的一类配置错误。
+var allowedRouteMethods = map[string]bool{
+	http.MethodGet: true, http.MethodHead: true, http.MethodPost: true,
+	http.MethodPut: true, http.MethodPatch: true, http.MethodDelete: true,
+	http.MethodOptions: true, http.MethodConnect: true, http.MethodTrace: true,
+}
+
+// normalizeRouteMethods 把 "get, POST" 归一成 "GET,POST"：去空白、转大写、去重、排序。
+// 返回空串表示不限方法。
+func normalizeRouteMethods(s string) (string, error) {
+	parts := strings.Split(s, ",")
+	seen := make(map[string]bool, len(parts))
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		m := strings.ToUpper(strings.TrimSpace(part))
+		if m == "" {
+			continue
+		}
+		if !allowedRouteMethods[m] {
+			return "", fmt.Errorf("methods contains invalid HTTP method %q", m)
+		}
+		if seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ","), nil
 }
 
 // validateServiceForWrite 校验服务的写请求并填充默认值，Create / Update 共用。

@@ -101,8 +101,15 @@ func (v *VersionStore) PublishSnapshot(ctx context.Context) (*model.Version, err
 	return ver, nil
 }
 
+// ErrEmptySnapshot 表示目标版本的快照里没有任何条目。
+//
+// 空快照通常来自「发布时所有资源都处于停用状态」。回滚到它会发布一个空版本，
+// gateway 刷新后路由表变空 —— 所有流量立刻 404，而且看上去是一次成功的发布。
+// 所以回滚必须在写库前就拒绝，而不是等数据面自己表现异常。
+var ErrEmptySnapshot = errors.New("target version has an empty snapshot")
+
 // Rollback 把某个历史版本重新发布为一个新的 published 版本（copy-forward）。
-// 目标版本不存在时返回 (nil, nil)。
+// 目标版本不存在时返回 (nil, nil)；快照为空时返回 ErrEmptySnapshot。
 func (v *VersionStore) Rollback(ctx context.Context, targetID int64) (*model.Version, error) {
 	publishMu.Lock()
 	defer publishMu.Unlock()
@@ -125,6 +132,18 @@ func (v *VersionStore) Rollback(ctx context.Context, targetID int64) (*model.Ver
 			return nil, nil
 		}
 		return nil, err
+	}
+
+	// 写之前先确认目标版本真的有内容。放在这里而不是复制之后：
+	// 「插入 0 行」不会报错，等发现时新版本已经发布出去了。
+	var itemCount int64
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM route_version_items WHERE version_id = $1`,
+		targetID).Scan(&itemCount); err != nil {
+		return nil, err
+	}
+	if itemCount == 0 {
+		return nil, fmt.Errorf("rollback to version id=%d: %w", targetID, ErrEmptySnapshot)
 	}
 
 	// 算新版本号

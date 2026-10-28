@@ -91,8 +91,7 @@ func (h *Handler) Rollback(w http.ResponseWriter, r *http.Request) {
 
 	ver, err := h.versions.Rollback(r.Context(), id)
 	if err != nil {
-		log.Println("rollback failed", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		writeRollbackError(w, err)
 		return
 	}
 	if ver == nil {
@@ -101,4 +100,19 @@ func (h *Handler) Rollback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, ver)
+}
+
+// writeRollbackError 把回滚的 store 错误映射成状态码。
+//
+// 空快照必须是 409：它是「这个操作在当前数据下不可执行」，
+// 不是服务端故障。混进 500 的话前端只会显示「服务器错误」，
+// 使用者会以为重试有用，而重复点击只会一直失败。
+func writeRollbackError(w http.ResponseWriter, err error) {
+	if errors.Is(err, postgres.ErrEmptySnapshot) {
+		writeError(w, http.StatusConflict,
+			"目标版本没有任何配置条目，回滚会让网关失去全部路由，已拒绝")
+		return
+	}
+	log.Println("rollback failed", err)
+	writeError(w, http.StatusInternalServerError, "internal server error")
 }
