@@ -16,6 +16,7 @@ import (
 
 	"github.com/bobdfy/flowgate/internal/adminui"
 	"github.com/bobdfy/flowgate/internal/api"
+	"github.com/bobdfy/flowgate/internal/errorlog"
 	"github.com/bobdfy/flowgate/internal/middleware"
 	"github.com/bobdfy/flowgate/internal/quota"
 	"github.com/bobdfy/flowgate/internal/store/postgres"
@@ -108,6 +109,14 @@ func main() {
 
 	// gateway 上报的节点健康与 AI 配置加载结果（只读）。
 	api.NewRuntimeHandler(rdb).RegisterRoutes(mux)
+
+	// 错误看板：数据由 gateway 写入 flowgate:errors，admin 只读转发。
+	// 没配 Redis 时 handler 返回 503，其余管理接口不受影响。
+	var errorLister api.ErrorLister
+	if rdb != nil {
+		errorLister = errorlog.NewRedisReader(rdb, errorlog.Key, errorlog.Cap)
+	}
+	api.NewLogsHandler(errorLister).RegisterRoutes(mux)
 
 	// 可选：同一端口托管管理控制台静态文件。
 	// 前端请求走相对路径 /api/v1，天然同源，不需要额外 nginx。

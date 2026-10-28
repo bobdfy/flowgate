@@ -5,7 +5,6 @@ import { Button } from '../components/ui/Button'
 import { Card, CardBody, CardHeader } from '../components/ui/Card'
 import { PageHeader } from '../components/layout/PageHeader'
 import { SourceBadge, type SourceState } from '../components/ui/SourceBadge'
-import { UnavailableState } from '../components/data/UnavailableState'
 import {
   capabilities,
   isMockMode,
@@ -45,7 +44,7 @@ export function OverviewPage() {
         description={
           isMockMode
             ? '演示模式：管理配置来自浏览器内 Mock 适配层，请勿据此判断真实运行状态。'
-            : '确认控制台的数据源接入状态。运行时指标仅在真实查询通道就绪后展示。'
+            : '确认控制台的数据源接入状态。运行时指标以只读外链打开，控制台不展示聚合图表。'
         }
         actions={
           <Button
@@ -121,7 +120,13 @@ export function OverviewPage() {
               </dd>
               <dt>指标端点</dt>
               <dd>
-                <code>:9090/metrics</code>
+                {isMockMode ? (
+                  <code>演示模式不适用</code>
+                ) : (
+                  <a href={env.metricsUrl} target="_blank" rel="noreferrer">
+                    {env.metricsUrl}
+                  </a>
+                )}
               </dd>
               <dt>控制台版本</dt>
               <dd>0.1.0 · 阶段 4</dd>
@@ -156,24 +161,35 @@ export function OverviewPage() {
 
       <Card>
         <CardHeader
-          title="运行时指标尚未接入"
-          description="没有可用的 Metrics BFF，因此不展示请求量、QPS、延迟分位或错误率"
+          title="运行时指标"
+          description="以只读外链打开 gateway 的 Prometheus 端点，控制台不解析、不聚合，也不展示推测数据"
         />
         <CardBody>
-          <UnavailableState
-            title="不展示推测数据"
-            description="gateway 已暴露 Prometheus 指标，但控制台尚无聚合查询接口。在接入前，总览不会使用静态示例或随机数填充图表。"
-            requirements={[
-              'GET :9090/metrics — Prometheus 文本格式',
-              '只读 Metrics BFF — 时间范围、步长、路由维度聚合',
-            ]}
-            actions={
-              <span className="row text-sm visually-muted">
-                <Info size={14} aria-hidden="true" />
-                这是真实的能力缺口，不是加载失败
+          {isMockMode ? (
+            <div className="callout callout--info">
+              <span>
+                演示模式没有真实 gateway，指标端点不存在，因此不提供外链。
               </span>
-            }
-          />
+            </div>
+          ) : (
+            <div className="row row--wrap">
+              <a
+                className="button button--secondary"
+                href={env.metricsUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <span className="button__icon">
+                  <Info size={14} aria-hidden="true" />
+                </span>
+                <span>打开指标页（新标签）</span>
+              </a>
+              <span className="text-sm visually-muted">
+                原始 Prometheus 文本格式；需要 QPS、延迟分位等聚合视图时，
+                仍需另接 Metrics BFF 或现有监控系统。
+              </span>
+            </div>
+          )}
         </CardBody>
       </Card>
     </div>

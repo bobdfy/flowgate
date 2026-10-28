@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bobdfy/flowgate/internal/ai"
+	"github.com/bobdfy/flowgate/internal/errorlog"
 	"github.com/bobdfy/flowgate/internal/gateway"
 	"github.com/bobdfy/flowgate/internal/gatewayapp"
 	"github.com/bobdfy/flowgate/internal/middleware"
@@ -67,7 +68,10 @@ func main() {
 
 	// ---- 限流：本地令牌桶 + Redis 分布式令牌桶，按 fail-mode 组合 ----
 	local := ratelimit.NewLocalLimiter(cfg.Burst)
-	redisL := ratelimit.NewRedisLimiter(rdb, 10*time.Second)
+	// 窗口 1s：qps_limit 才真的是「每秒请求数」。
+	// 之前用 10s 窗口，窗口内最多 qps_limit 个请求，实际速率只有标称值的 1/10
+	// （压测确认：qps_limit=5 的 key 10 秒只放行 5 个）。
+	redisL := ratelimit.NewRedisLimiter(rdb, time.Second)
 
 	// TPM 窗口：数据库是事实来源，-tpm-window 只用于首启种子。
 	// 管理面改窗口后，下面的 watcher 会热切换。
@@ -165,6 +169,16 @@ func main() {
 	defer runtimeCancel()
 	go gatewayapp.PublishRuntimeStatus(runtimeCtx, rdb, instance, rm.Pools, aiRT.Status)
 
+	// ---- 错误看板 ----
+	// 失败请求非阻塞写入 Redis：多实例共用、最多保留 500 种错误（按签名聚合）。
+	// Redis 不可用时丢弃并计数（flowgate_errorlog_dropped_total），不影响请求。
+	// dial 队列 256 条：错误是低频事件，够吸收一次 Redis 抖动的峰值。
+	if err := resetErrorlogKeys(rdb); err != nil {
+		slog.Warn("errorlog_reset_legacy_failed", "err", err)
+	}
+	errorRecorder := errorlog.NewRecorder(errorlog.NewRedisSink(rdb, errorlog.Key, errorlog.Cap), 256)
+	defer errorRecorder.Close()
+
 	// ---- 中间件链 ----
 	// 网关自己拒绝请求时回什么 body：AI 路径回 OpenAI 错误结构，其余回纯文本。
 	errorResponder := middleware.OpenAIErrorResponder(gatewayapp.IsAIRoute)
@@ -172,7 +186,7 @@ func main() {
 	guard := overload.NewGuard(cfg.MaxInflight, overload.StrategyFailFast, 0, 0)
 
 	handler := middleware.RequestID(
-		middleware.Logging(
+		middleware.LoggingWithErrors(errorRecorder, instance,
 			middleware.Inflight(guard, "instance")(
 				authenticator.RequireAuth(
 					middleware.RateLimitPair(
@@ -185,6 +199,13 @@ func main() {
 		),
 	)
 
+	state := gatewayapp.NewState()
+
+	root := http.NewServeMux()
+	root.HandleFunc("/healthz", state.Healthz)
+	root.HandleFunc("/readyz", state.Readyz)
+	root.Handle("/", handler) // 其余全部走原链路
+
 	gatewayapp.StartMetricsReporter(statsCtx, router)
 
 	// H1-a：连接池采样（每秒一次 pool.Stat()）。
@@ -193,7 +214,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           handler,
+		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20,
@@ -203,6 +224,8 @@ func main() {
 		gatewayapp.StartPProf()
 	}
 	gatewayapp.StartMetricsServer(cfg.MetricsAddr)
+
+	state.MarkReady()
 
 	// 在独立 goroutine 里监听，主 goroutine 等待退出信号。
 	go func() {
@@ -217,14 +240,33 @@ func main() {
 	defer stop()
 	<-sigCtx.Done()
 
-	log.Println("收到退出信号，开始优雅关闭 gateway ...")
+	log.Println("收到退出信号，停止接收新流量")
+	state.MarkDraining()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if cfg.DrainDelay > 0 {
+		time.Sleep(cfg.DrainDelay)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("gateway 优雅关闭失败: %v", err)
 	}
 
+	// 先排干错误看板队列：最后几条往往就是「为什么刚才挂了」的答案。
+	// 放在日志 sink 之前关闭，避免排干过程中的告警打不进日志。
+	errorRecorder.Close()
+
 	// 关闭日志 sink：排干队列并做最后一次 flush。
 	gatewayapp.ShutdownLogging(logSink)
+}
+
+// resetErrorlogKeys 清掉旧版本（LIST 结构）遗留的错误看板 key。
+// 类型不匹配会让后续所有写入 WRONGTYPE 失败、看板静默空白，所以启动时先修一次。
+// 失败（比如 Redis 还没就绪）只告警不阻塞启动：看板是旁路功能，不能拦住网关。
+func resetErrorlogKeys(rdb *redis.Client) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return errorlog.ResetLegacy(ctx, rdb, errorlog.Key)
 }

@@ -41,6 +41,9 @@ type aiModelConfig struct {
 	Name          string // 客户端请求体里写的模型名
 	Provider      string // 引用 aiProviderConfig.Name
 	UpstreamModel string // 发给上游的真实模型名
+
+	// MaxConcurrency 是这个模型的在途请求上限，0 = 不限。
+	MaxConcurrency int
 }
 
 // aiConfig 是 AI Gateway 的完整配置。
@@ -66,6 +69,9 @@ type yamlConfig struct {
 		Name          string `yaml:"name"`
 		Provider      string `yaml:"provider"`
 		UpstreamModel string `yaml:"upstream_model"`
+
+		// 只在首次导入 DB 时起作用；之后以 DB 为准。
+		MaxConcurrency int `yaml:"max_concurrency"`
 	} `yaml:"models"`
 }
 
@@ -126,10 +132,16 @@ func LoadAIConfig(path string) (*AIConfig, error) {
 		if m.Name == "" || m.Provider == "" {
 			return nil, fmt.Errorf("%s: model 缺少 name 或 provider 字段", path)
 		}
+		// 负数没有意义，而且会让护栏在启动时静默失效。
+		if m.MaxConcurrency < 0 {
+			return nil, fmt.Errorf("%s: model %q 的 max_concurrency 不能为负（0 表示不限），当前 %d",
+				path, m.Name, m.MaxConcurrency)
+		}
 		cfg.Models = append(cfg.Models, aiModelConfig{
-			Name:          m.Name,
-			Provider:      strings.ToLower(m.Provider),
-			UpstreamModel: m.UpstreamModel,
+			Name:           m.Name,
+			Provider:       strings.ToLower(m.Provider),
+			UpstreamModel:  m.UpstreamModel,
+			MaxConcurrency: m.MaxConcurrency,
 		})
 	}
 
@@ -305,9 +317,10 @@ func aiConfigFromDB(providers []model.AIProvider, models []model.AIModel) AIConf
 			upstream = m.Name
 		}
 		cfg.Models = append(cfg.Models, aiModelConfig{
-			Name:          m.Name,
-			Provider:      strings.ToLower(m.ProviderName),
-			UpstreamModel: upstream,
+			Name:           m.Name,
+			Provider:       strings.ToLower(m.ProviderName),
+			UpstreamModel:  upstream,
+			MaxConcurrency: m.MaxConcurrency,
 		})
 	}
 	return cfg
@@ -362,10 +375,11 @@ func aiSeedFromYAML(cfg AIConfig) ([]model.AIProvider, []model.AIModel) {
 			continue
 		}
 		models = append(models, model.AIModel{
-			Name:          m.Name,
-			ProviderName:  provider,
-			UpstreamModel: m.UpstreamModel,
-			Enabled:       true,
+			Name:           m.Name,
+			ProviderName:   provider,
+			UpstreamModel:  m.UpstreamModel,
+			MaxConcurrency: m.MaxConcurrency,
+			Enabled:        true,
 		})
 	}
 	return providers, models
@@ -416,12 +430,13 @@ func buildAIHandler(cfg AIConfig, tpm quota.Limiter, usage *postgres.UsageStore,
 		adapter := provider.NewOpenAIProvider(p.Name, p.APIKeys)
 
 		entry := &ai.ProviderEntry{
-			Name:          p.Name,
-			Provider:      adapter,
-			BaseURL:       p.Endpoint,
-			UpstreamPath:  p.UpstreamPath,
-			UpstreamModel: m.UpstreamModel,
-			StreamUsage:   p.StreamUsage,
+			Name:           p.Name,
+			Provider:       adapter,
+			BaseURL:        p.Endpoint,
+			UpstreamPath:   p.UpstreamPath,
+			UpstreamModel:  m.UpstreamModel,
+			StreamUsage:    p.StreamUsage,
+			MaxConcurrency: m.MaxConcurrency,
 		}
 
 		// 每个 entry 都要单独探 —— 以后挂不同适配器时能力可能不同。

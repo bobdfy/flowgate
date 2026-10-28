@@ -164,6 +164,42 @@ func TestValidateTenantForWrite(t *testing.T) {
 			t.Errorf("QPSLimit 期望兜底 100，得到 %d", tn.QPSLimit)
 		}
 	})
+
+	t.Run("QPSLimit 超过上限被拒", func(t *testing.T) {
+		// 多打一个 0 不会报错、只会让限流静默失效，所以要在写路径上拦住。
+		tn := model.Tenant{Name: "acme", QPSLimit: maxQPSLimit + 1}
+		if err := validateTenantForWrite(&tn); err == nil {
+			t.Fatal("超过上限的 qps_limit 应当被拒")
+		}
+	})
+
+	t.Run("QPSLimit 正好等于上限放行", func(t *testing.T) {
+		tn := model.Tenant{Name: "acme", QPSLimit: maxQPSLimit}
+		if err := validateTenantForWrite(&tn); err != nil {
+			t.Fatalf("边界值应放行，得到 %v", err)
+		}
+	})
+}
+
+// TestValidateAPIKeyQPSLimit 覆盖 Key 侧的同一组规则：
+// Create / Update 共用一份实现，两边都不能漏。
+func TestValidateAPIKeyQPSLimit(t *testing.T) {
+	t.Run("零值兜底 100", func(t *testing.T) {
+		k := model.APIKey{}
+		if err := validateAPIKeyQPSLimit(&k); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if k.QPSLimit != 100 {
+			t.Errorf("QPSLimit 期望兜底 100，得到 %d", k.QPSLimit)
+		}
+	})
+
+	t.Run("超过上限被拒", func(t *testing.T) {
+		k := model.APIKey{QPSLimit: maxQPSLimit + 1}
+		if err := validateAPIKeyQPSLimit(&k); err == nil {
+			t.Fatal("超过上限的 qps_limit 应当被拒")
+		}
+	})
 }
 
 // TestValidateRouteForWrite 覆盖 PUT 全量覆盖造成的两个陷阱，

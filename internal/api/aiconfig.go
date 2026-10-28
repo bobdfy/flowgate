@@ -46,7 +46,10 @@ type aiModelRequest struct {
 	Name          string `json:"name"`
 	ProviderName  string `json:"provider_name"`
 	UpstreamModel string `json:"upstream_model"`
-	Enabled       *bool  `json:"enabled"`
+
+	// 指针类型：不传表示不改（新建时取 0 = 不限），传 0 才能明确设成不限。
+	MaxConcurrency *int  `json:"max_concurrency"`
+	Enabled        *bool `json:"enabled"`
 }
 
 // ---- provider ----
@@ -274,6 +277,13 @@ func applyAIModelRequest(m *model.AIModel, req aiModelRequest) error {
 	provider := strings.TrimSpace(req.ProviderName)
 	if provider == "" {
 		return errors.New("provider_name is required")
+	}
+
+	if req.MaxConcurrency != nil {
+		if *req.MaxConcurrency < 0 {
+			return errors.New("max_concurrency must be >= 0 (0 means unlimited)")
+		}
+		m.MaxConcurrency = *req.MaxConcurrency
 	}
 
 	m.Name = name

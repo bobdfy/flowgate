@@ -1,5 +1,7 @@
 # Logs
-logs
+# 只忽略 web/ 根目录下的 logs/，不要写成 logs —— 那样会连带忽略
+# src/features/logs/，代码被静默排除在提交之外，CI 里就成了「找不到模块」。
+/logs
 *.log
 npm-debug.log*
 yarn-debug.log*

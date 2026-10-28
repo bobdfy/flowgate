@@ -277,7 +277,7 @@ export function ConnectionsPage() {
           <dl className="kv-list">
             <dt>管理 API</dt>
             <dd>
-              <code>{env.adminBaseUrl}</code> · 42 个已注册路由
+              <code>{env.adminBaseUrl}</code> · 43 个已注册路由
             </dd>
             <dt>鉴权</dt>
             <dd>
@@ -290,10 +290,23 @@ export function ConnectionsPage() {
             </dd>
             <dt>指标端点</dt>
             <dd>
-              <code>:9090/metrics</code> · Prometheus 文本格式，未提供管理面代理
+              {isMockMode ? (
+                '演示模式没有真实 gateway，不提供指标入口'
+              ) : (
+                <>
+                  <a href={env.metricsUrl} target="_blank" rel="noreferrer">
+                    {env.metricsUrl}
+                  </a>{' '}
+                  · Prometheus 文本格式，新标签打开；侧边栏也有「运行指标」入口
+                </>
+              )}
             </dd>
-            <dt>请求日志</dt>
-            <dd>gateway access log 仅输出到 stdout，暂无持久化或查询 API</dd>
+            <dt>错误请求</dt>
+            <dd>
+              gateway 把失败请求写入 Redis 窗口（最多 500 条），
+              经 <code>/api/v1/logs/errors</code> 查询；全量 access log 仍只输出到
+              stdout
+            </dd>
           </dl>
           <div className="callout callout--info" style={{ marginTop: 16 }}>
             <span>

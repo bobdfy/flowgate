@@ -29,7 +29,9 @@ func NewAIConfigStore(pool *pgxpool.Pool) *AIConfigStore {
 const aiProviderCols = `id, name, type, endpoint, upstream_path, api_key_env, api_key,
 	stream_usage, enabled, created_at, updated_at`
 
-const aiModelCols = `name, provider_name, upstream_model, enabled, created_at, updated_at`
+// aiModelCols 的顺序必须和三处 rows.Scan 的接收顺序完全一致，改一处就得全改。
+const aiModelCols = `name, provider_name, upstream_model, max_concurrency,
+	enabled, created_at, updated_at`
 
 // Version 返回当前配置版本号。
 func (s *AIConfigStore) Version(ctx context.Context) (int64, error) {
@@ -87,7 +89,7 @@ func (s *AIConfigStore) Snapshot(ctx context.Context) ([]model.AIProvider, []mod
 	models := []model.AIModel{}
 	for rows.Next() {
 		var m model.AIModel
-		if err := rows.Scan(&m.Name, &m.ProviderName, &m.UpstreamModel,
+		if err := rows.Scan(&m.Name, &m.ProviderName, &m.UpstreamModel, &m.MaxConcurrency,
 			&m.Enabled, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			rows.Close()
 			return nil, nil, 0, fmt.Errorf("scan ai model failed: %w", err)
@@ -136,9 +138,9 @@ func (s *AIConfigStore) Seed(ctx context.Context, providers []model.AIProvider, 
 	}
 	for _, m := range models {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO ai_models (name, provider_name, upstream_model, enabled)
-			 VALUES ($1,$2,$3,$4)`,
-			m.Name, m.ProviderName, m.UpstreamModel, m.Enabled,
+			`INSERT INTO ai_models (name, provider_name, upstream_model, max_concurrency, enabled)
+			 VALUES ($1,$2,$3,$4,$5)`,
+			m.Name, m.ProviderName, m.UpstreamModel, m.MaxConcurrency, m.Enabled,
 		); err != nil {
 			return false, fmt.Errorf("seed ai model %s failed: %w", m.Name, err)
 		}
@@ -268,7 +270,7 @@ func (s *AIConfigStore) ListModels(ctx context.Context) ([]model.AIModel, error)
 	out := []model.AIModel{}
 	for rows.Next() {
 		var m model.AIModel
-		if err := rows.Scan(&m.Name, &m.ProviderName, &m.UpstreamModel,
+		if err := rows.Scan(&m.Name, &m.ProviderName, &m.UpstreamModel, &m.MaxConcurrency,
 			&m.Enabled, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan ai model failed: %w", err)
 		}
@@ -281,9 +283,9 @@ func (s *AIConfigStore) ListModels(ctx context.Context) ([]model.AIModel, error)
 func (s *AIConfigStore) CreateModel(ctx context.Context, m *model.AIModel) error {
 	return s.write(ctx, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
-			`INSERT INTO ai_models (name, provider_name, upstream_model, enabled)
-			 VALUES ($1,$2,$3,$4) RETURNING created_at, updated_at`,
-			m.Name, m.ProviderName, m.UpstreamModel, m.Enabled,
+			`INSERT INTO ai_models (name, provider_name, upstream_model, max_concurrency, enabled)
+			 VALUES ($1,$2,$3,$4,$5) RETURNING created_at, updated_at`,
+			m.Name, m.ProviderName, m.UpstreamModel, m.MaxConcurrency, m.Enabled,
 		).Scan(&m.CreatedAt, &m.UpdatedAt)
 		if err != nil {
 			return fmt.Errorf("create ai model (name=%s) failed: %w", m.Name, err)
@@ -297,10 +299,10 @@ func (s *AIConfigStore) UpdateModel(ctx context.Context, m *model.AIModel) error
 	return s.write(ctx, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
 			`UPDATE ai_models
-			 SET provider_name=$1, upstream_model=$2, enabled=$3, updated_at=now()
-			 WHERE name=$4
+			 SET provider_name=$1, upstream_model=$2, max_concurrency=$3, enabled=$4, updated_at=now()
+			 WHERE name=$5
 			 RETURNING created_at, updated_at`,
-			m.ProviderName, m.UpstreamModel, m.Enabled, m.Name,
+			m.ProviderName, m.UpstreamModel, m.MaxConcurrency, m.Enabled, m.Name,
 		).Scan(&m.CreatedAt, &m.UpdatedAt)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {

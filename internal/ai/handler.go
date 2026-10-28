@@ -15,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bobdfy/flowgate/internal/errorlog"
 	"github.com/bobdfy/flowgate/internal/identity"
+	"github.com/bobdfy/flowgate/internal/loadbalance"
 	"github.com/bobdfy/flowgate/internal/model"
 	"github.com/bobdfy/flowgate/internal/netguard"
 	"github.com/bobdfy/flowgate/internal/observability"
@@ -55,6 +57,10 @@ type ProviderEntry struct {
 	// StreamUsage 表示上游支持 stream_options.include_usage。
 	// 开启后网关会替没要 usage 的客户端向上游要，结算用真实值，再把 usage 帧吞掉。
 	StreamUsage bool
+
+	// MaxConcurrency 是发往这个模型的在途请求上限，0 = 不限。
+	// 名额跟着整条请求（含整条 SSE）走，超限快速拒绝，不排队。
+	MaxConcurrency int
 }
 
 // Handler 处理 AI 请求（OpenAI 兼容接口）。
@@ -72,6 +78,14 @@ type Handler struct {
 
 	// usage 可为 nil（不记录用量）。
 	usage UsageRecorder
+
+	// limits 是模型级并发名额，key 是对外模型名。
+	// 没配上限（MaxConcurrency<=0）的模型不进这个 map，取到 nil 即不限。
+	limits map[string]*modelLimiter
+
+	// breakers 是 provider 级熔断器，key 是 ProviderEntry.Name。
+	// 多个模型可以共用一个 provider，所以按 provider 而不是模型名分桶。
+	breakers map[string]*breaker
 }
 
 // ttftStartKey [网关开始处理本请求的时刻]，供流式转发算 token 耗时
@@ -139,10 +153,28 @@ func NewHandler(provider map[string]*ProviderEntry, clients *Clients) *Handler {
 	if clients == nil {
 		clients = NewClients(nil, DefaultTimeouts()) // 兜底：宁可全拒，也不能变成不校验
 	}
+	limits := make(map[string]*modelLimiter, len(provider))
+	breakers := make(map[string]*breaker, len(provider))
+	for name, e := range provider {
+		if e == nil {
+			continue
+		}
+		if e.MaxConcurrency > 0 {
+			limits[name] = newModelLimiter(name, e.MaxConcurrency)
+		}
+		if e.Name != "" {
+			if _, ok := breakers[e.Name]; !ok {
+				breakers[e.Name] = newBreaker(e.Name)
+			}
+		}
+	}
+
 	return &Handler{
 		providers: provider,
 		clients:   clients,
 		streams:   streamProxy,
+		limits:    limits,
+		breakers:  breakers,
 	}
 }
 
@@ -239,7 +271,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5.2 用量流水：模型解析通过后开始记录，状态码由 statusWriter 捕获。
+	// 5.15 熔断：上游已经确定不可用时，快速拒绝，别把请求压到一个死掉的上游上。
+	// 放在并发名额之前 —— 熔断中的请求不该再占名额，否则排队等名额的请求
+	// 拿到名额后依然是 503，白白拉高了延迟。
+	lease, breakerOK := h.acquireBreakerSlot(w, r, entry)
+	if !breakerOK {
+		return
+	}
+	// 兜底：任何提前 return 都要把半开试探名额还回去，并记为中性。
+	// Done 是幂等的，后面显式结算会覆盖这一次。
+	defer lease.Done(loadbalance.OutcomeNeutral)
+
+	// 5.2 模型级并发名额：覆盖整条请求（含整条 SSE）。
+	// 必须在这里 defer —— 放在 forward() 里会在拿到响应头时就归还，
+	// 那时流还没开始读，上限等于没设。
+	release, slotOK := h.acquireModelSlot(w, r, req.Model)
+	if !slotOK {
+		return
+	}
+	defer release()
+
+	// 5.3 用量流水：模型解析通过后开始记录，状态码由 statusWriter 捕获。
 	start := time.Now()
 	r = r.WithContext(context.WithValue(r.Context(), ttftStartKey{}, start))
 
@@ -344,6 +396,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 9. 发上游请求。
 	resp, err := h.forward(r, entry, apiName, header, body, streaming)
 	if err != nil {
+		// 客户端取消记中性：用户走了不代表上游不可用（P0-12）。
+		lease.Done(classifyForwardError(err))
+
 		// C8：客户端主动取消时连接已断开，回写无意义，别把取消误报成非标准 499。
 		if errors.Is(err, context.Canceled) {
 			slog.Info("ai_forward_canceled",
@@ -351,6 +406,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		status, errType := classifyUpstreamError(err)
+		kind := errorlog.KindUpstream
+		if status == http.StatusGatewayTimeout {
+			kind = errorlog.KindTimeout
+		}
+		// detail 会截断到 200 字符：错误原文可能带上游 URL 或响应片段。
+		errorlog.Set(r.Context(), kind, err.Error())
 		slog.Error("ai_forward_failed",
 			"model", req.Model, "provider", entry.Name,
 			"api", string(apiName), "streaming", streaming, "err", err)
@@ -361,9 +422,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 10~11. 输出。
 	if streaming {
-		h.serveStream(w, r, resp, req.Model, body, settler, stripUsage, &rec)
+		// 流式要等整条流结束才能判定上游是否真的健康
+		// （200 之后中途断流同样算故障），所以结算在 serveStream 内部完成。
+		lease.Done(h.serveStream(w, r, resp, req.Model, body, settler, stripUsage, &rec))
 		return
 	}
+	lease.Done(classifyStatus(resp.StatusCode))
 	u := h.serveBuffered(w, resp, req.Model)
 	rec.PromptTokens = int64(u.PromptTokens)
 	rec.CompletionTokens = int64(u.CompletionTokens)
@@ -445,7 +509,10 @@ func (h *Handler) serveBuffered(w http.ResponseWriter, resp *http.Response, mode
 
 // serveStream 处理流式响应：交给注入的 SSE 转发器。
 // rec 不为 nil 时，把流式统计写回去（prompt/completion 可能是估算值）。
-func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, body []byte, settler *tpmSettler, stripUsage bool, rec *model.AIUsage) {
+//
+// 返回值是本次流对熔断器的结算结果：200 之后中途断流同样算上游故障，
+// 所以判定必须放在这里，而不是拿到响应头的那一刻。
+func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, body []byte, settler *tpmSettler, stripUsage bool, rec *model.AIUsage) loadbalance.Outcome {
 	if h.streams == nil {
 		slog.Warn("ai_stream_forwarder_missing", "model", model)
 		u := h.serveBuffered(w, resp, model)
@@ -457,7 +524,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 		if settler != nil {
 			settler.Settle(int64(u.TotalTokens))
 		}
-		return
+		return classifyStatus(resp.StatusCode)
 	}
 
 	if resp.StatusCode >= 400 {
@@ -465,7 +532,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 		copySafeHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(respBody)
-		return
+		return classifyStatus(resp.StatusCode)
 	}
 
 	prepareStreamHeaders(w, resp)
@@ -473,6 +540,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 
 	usage := newStreamUsage(body, stripUsage)
 
+	outcome := loadbalance.OutcomeSuccess
 	if err := h.streams(w, r, resp.Body, usage.sink(), model); err != nil {
 		reason := "upstream_error"
 		if b, ok := resp.Body.(*streamBody); ok {
@@ -487,6 +555,25 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 		}
 		observability.AIStreamTerminatedTotal.WithLabelValues(reason).Inc()
 		slog.Warn("ai_stream_failed", "model", model, "reason", reason, "err", err)
+
+		// 流式响应这时已经写出 200 了，光看状态码看不出失败 —— 必须显式归因。
+		// 客户端自己走不记（P0-12）：用户主动断开不是错误。
+		switch reason {
+		case "client_cancel":
+			// 不记
+		case "idle_timeout", "max_duration":
+			errorlog.Set(r.Context(), errorlog.KindTimeout, reason+": "+err.Error())
+		default:
+			errorlog.Set(r.Context(), errorlog.KindStream, reason+": "+err.Error())
+		}
+
+		// 只有「上游不说话」和「上游把流截断」算可用性故障。
+		// 客户端自己走、或撞到我们配置的最大时长，都不能怪上游。
+		outcome = loadbalance.OutcomeFailure
+		switch reason {
+		case "client_cancel", "max_duration":
+			outcome = loadbalance.OutcomeNeutral
+		}
 	} else {
 		observability.AIStreamTerminatedTotal.WithLabelValues("normal").Inc()
 	}
@@ -516,6 +603,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 			"completion_est", usage.completionBytes/4,
 			"ratio", float64(usage.estimated())/float64(usage.total))
 	}
+	return outcome
 }
 
 // forward 把请求发到上游，返回上游响应。

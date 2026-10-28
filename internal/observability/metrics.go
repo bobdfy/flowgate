@@ -331,6 +331,39 @@ var (
 		Name: "flowgate_ai_stream_terminated_total",
 		Help: "AI 流式请求的结束原因分布",
 	}, []string{"reason"})
+
+	// AI 模型级并发超限被拒。
+	// model 是管理面配置的模型别名（有界集合）；scope 是枚举：model / tenant。
+	AIModelConcurrencyRejected = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "flowgate_ai_concurrency_rejected_total",
+		Help: "AI 模型级并发超限被拒绝的请求数",
+	}, []string{"model", "scope"})
+
+	// AI 模型当前在途请求数（覆盖整条 SSE，含客户端还没读完的部分）。
+	AIModelInflight = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "flowgate_ai_model_inflight",
+		Help: "AI 模型当前在途请求数",
+	}, []string{"model"})
+
+	// AI provider 熔断状态：0=closed, 1=open, 2=half_open。
+	// 与普通链路的 flowgate_circuit_state 分开，避免把 provider 名塞进 addr 标签。
+	AICircuitState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "flowgate_ai_circuit_state",
+		Help: "AI provider 熔断状态：0=closed, 1=open, 2=half_open",
+	}, []string{"provider"})
+
+	// 熔断打开期间被快速拒绝的请求数。
+	AIBreakerRejected = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "flowgate_ai_breaker_rejected_total",
+		Help: "AI provider 熔断期间被快速拒绝的请求数",
+	}, []string{"provider"})
+
+	// 错误看板：写入 Redis 失败的条目数（队列满 / Redis 不可用）。
+	// 该指标只增不减，配合错误看板页面的「可能不完整」提示使用。
+	ErrorLogDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "flowgate_errorlog_dropped_total",
+		Help: "写入错误看板时被丢弃的条目数（队列满或 Redis 不可用）",
+	})
 )
 
 func init() {
@@ -375,5 +408,12 @@ func init() {
 		AuthCacheMissesTotal,
 		AuthDBSearchesTotal,
 		AIStreamTerminatedTotal,
+		// AI 模型级并发
+		AIModelConcurrencyRejected,
+		AIModelInflight,
+		AICircuitState,
+		AIBreakerRejected,
+		// 错误看板
+		ErrorLogDroppedTotal,
 	)
 }

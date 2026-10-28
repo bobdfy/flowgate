@@ -37,8 +37,9 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	if k.Status == "" {
 		k.Status = "active"
 	}
-	if k.QPSLimit <= 0 {
-		k.QPSLimit = 100
+	if err := validateAPIKeyQPSLimit(&k); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	// 模型白名单：只接受已存在的模型别名；空 = 不限制。
@@ -114,8 +115,9 @@ func (h *Handler) UpdateAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "status must be active or disabled")
 		return
 	}
-	if k.QPSLimit <= 0 {
-		k.QPSLimit = 100
+	if err := validateAPIKeyQPSLimit(&k); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	// allowed_models 按需更新：

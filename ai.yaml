@@ -26,15 +26,25 @@ providers:
     enabled: true
     stream_usage: true
 
+# max_concurrency：这个模型的在途请求上限，0 = 不限。
+# 名额覆盖整条 SSE 生命周期，超限直接 429，不排队。
+# 注意：这一项只在首次导入 DB（ai_providers/ai_models 为空）时生效，
+# 之后以 DB 为准，改配置请走管理面或直接改表。
 models:
   - name: flowgate-chat
     provider: zhipu
     upstream_model: glm-5.3
+    max_concurrency: 200
 
+  # 主力模型。600 条并发 ≈ 10 QPS（按每条流 60 秒算），
+  # 与实例级 1000 之间留出余量给其他模型，保证它吃不干整个进程。
   - name: flowgate-deepseek
     provider: deepseek
     upstream_model: deepseek-chat
+    max_concurrency: 600
 
+  # 本地假上游，故意给个小值，方便验证「一个模型占满不影响其他模型」。
   - name: flowgate-mock
     provider: mockai
     upstream_model: mock-gpt
+    max_concurrency: 8

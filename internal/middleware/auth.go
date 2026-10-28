@@ -98,14 +98,17 @@ func apiKeyFromRequest(r *http.Request) string {
 
 // setIdentity 把 key 对应的身份写进 ctx，交给下游（限流 / AI 网关 / 用量记录）。
 func setIdentity(ctx context.Context, k *model.APIKey) context.Context {
-	return identity.WithIdentity(ctx, &identity.Identity{
+	id := &identity.Identity{
 		TenantID:      k.TenantID,
 		KeyID:         k.ID,
 		TenantQPS:     k.TenantQPSLimit,
 		TenantTPM:     k.TenantTPMLimit,
 		KeyQPS:        k.QPSLimit,
 		AllowedModels: k.AllowedModels,
-	})
+	}
+	// 外层的 Logging 拿不到内层新建的 ctx，错误看板要靠这个快照拿到租户 / Key。
+	storeIdentitySnapshot(ctx, id)
+	return identity.WithIdentity(ctx, id)
 }
 
 // RequireAuth 返回鉴权中间件。

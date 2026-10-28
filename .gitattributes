@@ -1,0 +1,10 @@
+# Go 源码在仓库和检出时统一用 LF。
+#
+# 原因：gofmt 只认 LF。Windows 上 core.autocrlf=true（或编辑器默认 CRLF）会把
+# *.go 检出成 CRLF，此时 gofmt -l 会把每一个文件都报成「未格式化」——
+# 看着像全项目都没格式化，其实只是换行符不同。
+# 显式声明 eol=lf 后，检出即 LF，gofmt 的结果就只剩真实的格式问题。
+*.go text eol=lf
+
+# 脚本同理：CRLF 会让 bash 的 shebang 变成 "/usr/bin/env bash\r"，直接跑不起来。
+*.sh text eol=lf

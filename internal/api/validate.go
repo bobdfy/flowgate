@@ -64,6 +64,30 @@ func validateNodeAddress(addr string) error {
 	return nil
 }
 
+// maxQPSLimit 是 qps_limit 的硬上限（租户与 Key 共用）。
+//
+// 为什么需要：这个字段填错一位不会报任何错，只会让限流静默失效
+// —— 把 100 打成 1000000，等于给这个租户开了无限配额，要等到它把上游打挂
+// 才看得出来。上限纯粹是防手滑，不是性能约束。
+const maxQPSLimit = 100_000
+
+// validateQPSLimit 校验 qps_limit 是否在上限内。
+func validateQPSLimit(qps int64) error {
+	if qps > maxQPSLimit {
+		return fmt.Errorf("qps_limit must be <= %d", maxQPSLimit)
+	}
+	return nil
+}
+
+// validateAPIKeyQPSLimit 填充 Key 的默认配额并校验上限，Create / Update 共用。
+// 抽成一份的理由和下面租户的一样：两条写路径各写一份，迟早有一边漏掉。
+func validateAPIKeyQPSLimit(k *model.APIKey) error {
+	if k.QPSLimit <= 0 {
+		k.QPSLimit = 100
+	}
+	return validateQPSLimit(k.QPSLimit)
+}
+
 // validateTenantForWrite 校验租户的写请求并填充默认值，Create / Update 共用。
 //
 // 这里修掉的是一个真实缺陷：UpdateTenant 原先不做默认值填充，
@@ -82,6 +106,9 @@ func validateTenantForWrite(t *model.Tenant) error {
 	}
 	if t.QPSLimit <= 0 {
 		t.QPSLimit = 100
+	}
+	if err := validateQPSLimit(t.QPSLimit); err != nil {
+		return err
 	}
 	if t.TPMLimit <= 0 {
 		t.TPMLimit = 100000

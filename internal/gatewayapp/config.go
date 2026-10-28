@@ -34,6 +34,8 @@ type Config struct {
 	AIBufferedTimeout       time.Duration
 	AIStreamIdleTimeout     time.Duration
 	AIStreamMaxDuration     time.Duration
+	DrainDelay              time.Duration
+	ShutdownTimeout         time.Duration
 }
 
 // ParseFlags 定义并解析命令行参数。只能在 main 里调用一次。
@@ -63,9 +65,9 @@ func ParseFlags() *Config {
 	// 默认值取自环境变量，这样容器只配一份 ALLOW_UPSTREAM_CIDRS 即可
 	// （admin 走配置期校验，gateway 走拨号期校验，两边规则要一致）。
 	flag.StringVar(&c.AllowUpstreamCIDRs, "allow-upstream-cidrs", os.Getenv("ALLOW_UPSTREAM_CIDRS"),
-		"允许访问的内网网段，逗号分隔（如 172.16.0.0/12,127.0.0.1/32）；默认空=禁止所有内网地址")
+		"允许访问的内网网段，逗号分隔（如 172.16.0.0/12,127.0.0.1/32 ）；默认空=禁止所有内网地址")
 
-	flag.IntVar(&c.MaxInflight, "max-inflight", 1000, "实例级在途请求上限（0 表示不限制，仅用于压测对照）")
+	flag.IntVar(&c.MaxInflight, "max-inflight", 1000, "实例级在途请求上限（ 0 表示不限制，仅用于压测对照）")
 
 	flag.DurationVar(&c.AIConnectTimeout, "ai-connect-timeout", 5*time.Second, "必须要大于0")
 
@@ -77,6 +79,10 @@ func ParseFlags() *Config {
 
 	flag.DurationVar(&c.AIStreamMaxDuration, "ai-stream-max-duration", 0, ">= 0")
 
+	flag.DurationVar(&c.DrainDelay, "drain-delay", 5*time.Second, ">=0")
+
+	flag.DurationVar(&c.ShutdownTimeout, "shutdown-timeout", 30*time.Second, ">=0")
+
 	flag.Parse()
 	return c
 }
@@ -84,16 +90,16 @@ func ParseFlags() *Config {
 // Validate 拒绝明显不合法的参数组合，让进程在启动阶段就失败，而不是运行中行为诡异。
 func (c *Config) Validate() error {
 	if c.Burst <= 0 {
-		return fmt.Errorf("burst 必须大于 0，当前 %v", c.Burst)
+		return fmt.Errorf("burst 必须大于 0, 当前 %v", c.Burst)
 	}
 	if c.TPMWindow < time.Second {
-		return fmt.Errorf("tpm-window 不得小于 1s，当前 %s", c.TPMWindow)
+		return fmt.Errorf("tpm-window 不得小于 1s, 当前 %s", c.TPMWindow)
 	}
 
 	switch c.TPMFailMode {
 	case "closed", "fallback", "open":
 	default:
-		return fmt.Errorf("tpm-fail-mode 只能是 closed / fallback / open，当前 %q", c.TPMFailMode)
+		return fmt.Errorf("tpm-fail-mode 只能是 closed / fallback / open, 当前 %q", c.TPMFailMode)
 	}
 
 	if c.MaxInflight < 0 {
@@ -119,12 +125,20 @@ func (c *Config) Validate() error {
 		{"ai-stream-idle-timeout", c.AIStreamIdleTimeout},
 	} {
 		if it.val <= 0 {
-			return fmt.Errorf("%s 必须大于 0，当前 %s", it.name, it.val)
+			return fmt.Errorf("%s 必须大于 0, 当前 %s", it.name, it.val)
 		}
 	}
 	// 0 = 不限总时长，是合法值；负数没有意义。
 	if c.AIStreamMaxDuration < 0 {
-		return fmt.Errorf("ai-stream-max-duration 不能为负（0 表示不限），当前 %s", c.AIStreamMaxDuration)
+		return fmt.Errorf("ai-stream-max-duration 不能为负（ 0 表示不限），当前 %s", c.AIStreamMaxDuration)
+	}
+
+	if c.DrainDelay < 0 {
+		return fmt.Errorf("drain-delay 不能为负（ 0 表示不等待 ），当前 %s", c.DrainDelay)
+	}
+
+	if c.ShutdownTimeout < 0 {
+		return fmt.Errorf("shutdown-timeout 不能为负（ 0表示不等待 ），当前 %s", c.ShutdownTimeout)
 	}
 
 	return nil

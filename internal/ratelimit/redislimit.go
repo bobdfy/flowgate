@@ -64,6 +64,9 @@ type RedisLimiter struct {
 	pairScript *redis.Script
 }
 
+// NewRedisLimiter 创建滑动窗口限流器：任意 window 时长内最多放行 limit 个请求。
+// 注意「窗口」不会抬高吞吐，只会把限额摊薄 —— 配 qps_limit 时 window 必须是 1s，
+// 否则字段名叫 QPS、实际速率是 qps_limit/window 秒，差一个窗口倍数。
 func NewRedisLimiter(rdb *redis.Client, window time.Duration) *RedisLimiter {
 	return &RedisLimiter{
 		rdb:        rdb,

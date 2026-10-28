@@ -11,7 +11,7 @@ export const OverviewPage = lazy(() =>
 )
 
 export const LogsPage = lazy(() =>
-  import('../pages/plannedPages').then((module) => ({
+  import('../pages/LogsPage').then((module) => ({
     default: module.LogsPage,
   })),
 )
