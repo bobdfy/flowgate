@@ -156,8 +156,8 @@ func wantsStreamUsage(body []byte) bool {
 	return json.Unmarshal(body, &p) == nil && p.StreamOptions.IncludeUsage
 }
 
-// ensureStreamUsage 往请求体里注入 stream_options.include_usage=true。
-// 保留 stream_options 里的其它字段；它如果不是对象，直接覆盖。
+// ensureStreamUsage 往请求体里注入 stream_options.include_usage=true
+// 保留 stream_options 里的其它字段；它如果不是对象，直接覆盖
 func ensureStreamUsage(body []byte) ([]byte, error) {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(body, &root); err != nil {

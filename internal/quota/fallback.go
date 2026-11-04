@@ -1,10 +1,5 @@
 package quota
 
-// TPM 配额在 Redis 故障时的显式降级策略。
-//
-// 没有这一层时，预扣失败只打一行日志就继续转发，等于配额治理静默失效。
-// 这里把「故障时怎么办」变成配置：closed 拒绝、open 放行、fallback 用本地近似。
-
 import (
 	"context"
 	"errors"
@@ -35,7 +30,6 @@ const (
 const defaultAlertGap = 30 * time.Second
 
 // FallbackTPM 给 Limiter 加一层故障策略。
-//
 // primary 正常时行为完全不变；只有 primary 报错才会走 mode 分支。
 type FallbackTPM struct {
 	primary Limiter

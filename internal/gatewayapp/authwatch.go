@@ -15,8 +15,6 @@ import (
 const authCachePollInterval = 3 * time.Second
 
 // WatchAuthVersion 轮询 auth_version，发现变化就清空鉴权缓存。
-//
-// 鉴权缓存存的是整个 model.APIKey（含 allowed_models 和租户限额），
 // 不失效的话，改白名单要等 TTL 过期才生效。版本号由管理面写 API Key /
 // 租户时在同一个事务里 +1。
 func WatchAuthVersion(ctx context.Context, db *pgxpool.Pool, a *middleware.Authenticator) {

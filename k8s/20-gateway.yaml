@@ -19,12 +19,18 @@ spec:
         - name: gateway
           image: flowgate-gateway:latest
           imagePullPolicy: IfNotPresent
-          args: ["-ai=false"]
+          args: 
+            - "-ai=false"
+            - "-pprof"
+            - "-pprof-addr"
+            - "0.0.0.0:6060"
           ports:
             - name: http
               containerPort: 8090
             - name: metrics
               containerPort: 9090
+            - name: debug
+              containerPort: 6060
           env:
             - name: DATABASE_URL
               valueFrom:
@@ -71,3 +77,5 @@ spec:
     - name: metrics
       port: 9090
       targetPort: 9090
+      # 6060 (pprof) 故意不放这里：调试走 kubectl port-forward。
+      # 加进来会通过 ClusterIP 暴露给整个集群，而 pprof 能 dump 堆和 goroutine。

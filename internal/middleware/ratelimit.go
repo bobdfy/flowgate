@@ -120,14 +120,21 @@ func RateLimitPair(limiter PairLimiter, keyFn PairKeyFunc, next http.Handler, re
 
 		if err != nil {
 			slog.Error("rate_limit_error", "err", err, "method", r.Method, "path", r.URL.Path)
-			if p, ok := limiter.(interface{ FailMode() ratelimit.FailMode }); ok && p.FailMode() == ratelimit.FailOpen {
+
+			mode := ratelimit.FailOpen
+			if p, ok := limiter.(interface{ FailMode() ratelimit.FailMode }); ok {
+				mode = p.FailMode()
+			}
+
+			if mode != ratelimit.FailOpen {
 				if responder != nil {
 					responder(w, r, http.StatusServiceUnavailable, "rate limiter unavailable")
 					return
 				}
-				http.Error(w, "rate limiter unavailable", http.StatusServiceUnavailable)
+				http.Error(w, "rate limiter unvailable", http.StatusServiceUnavailable)
 				return
 			}
+
 			next.ServeHTTP(w, r)
 			return
 		}

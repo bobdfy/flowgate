@@ -1,7 +1,5 @@
 package gatewayapp
 
-// 日志输出：把 slog 接到 logsink（单 goroutine + 有界队列 + 批量落盘）。
-
 import (
 	"fmt"
 	"log/slog"
@@ -12,12 +10,8 @@ import (
 )
 
 // SetupLogging 安装全局日志，返回需要在退出时关闭的 sink。
-//
-// ★ 为什么不能直接写 os.Stdout：slog 每次日志都是一次 syscall，
-// 压测时 access_log 每请求写一次 stdout 会变成最大 CPU 热点（实测 ~30%）。
-// logsink 用 bufio.Writer 把小块 JSON 攒成 64KB 批量落盘，单 goroutine 定时 flush；
-// 请求 goroutine 只做拷贝 + 非阻塞入队，既避免 bufio 的并发竞态，
-// 也不会被慢速 stdout 阻塞（队列满时丢弃并计数）。
+// logsink 用 bufio.Writer 攒批由单协程定时刷盘
+// 拷贝 + 非阻塞入队，避免 bufio 的并发竞态，不被慢速 stdout 阻塞（队列满时丢弃并计数）。
 func SetupLogging() *logsink.Sink {
 	sink := logsink.New(os.Stdout, 64*1024, 4096, 200*time.Millisecond)
 	slog.SetDefault(slog.New(slog.NewJSONHandler(sink, nil)))

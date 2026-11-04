@@ -178,10 +178,10 @@ func classifyForwardError(err error) loadbalance.Outcome {
 	case err == nil:
 		return loadbalance.OutcomeSuccess
 	case errors.Is(err, context.Canceled):
-		// 客户端走了，上游是死是活我们并不知道。
+		// 客户端走了，上游是死是活我们并不知道
 		return loadbalance.OutcomeNeutral
 	default:
-		// 其余一律是连接/超时/协议层故障，算上游不可用。
+		// 其余一律是连接/超时/协议层故障，算上游不可用
 		return loadbalance.OutcomeFailure
 	}
 }

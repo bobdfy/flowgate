@@ -106,8 +106,10 @@ func BuildRoutes(items []model.VersionItem, cache *ProxyCache, pools map[int64]*
 			pool.SetCBConfig(svc.CBFailureThreshold, svc.CBCooldownMs, svc.CBHalfOpenLimit)
 
 			lb := loadbalance.NewRoundRobin(pool)
+
 			backend = &Backend{svc: svc, lb: lb, proxyCache: cache,
-				guard: overload.NewGuard(svc.MaxConcurrency,
+				guard: overload.NewGuard(
+					svc.MaxConcurrency,
 					overload.Strategy(svc.OverloadStrategy),
 					time.Duration(svc.QueueTimeoutMs)*time.Millisecond,
 					overload.DefaultQueueCapacity(svc.MaxConcurrency))}
@@ -217,18 +219,13 @@ func (e *routeEntry) moreSpecific(other *routeEntry) bool {
 }
 
 // normalizePathMatchType 把匹配类型归一成小写。
-//
-// 写接口已经会校验，但库里可能留着历史数据（"Exact" / " EXACT "）。
-// 匹配只看 e.matchType == "exact"，不归一化的话这些路由会被静默降级成前缀匹配。
-// 每条路由只在建表时算一次，不进热路径。
+// 匹配只看 e.matchType == "exact"，不归一会被静默降级成前缀匹配。
 func normalizePathMatchType(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
 
-// parseMethods 把 "GET,POST" 拆成集合；空串返回 nil（不限）。
-//
-// 统一转大写：req.Method 永远是规范大写形式，而 methods 是人工录入的字符串。
-// 老快照里可能存着 "get"，不归一化就等于那条路由永不命中。
+// parseMethods 把 "GET,POST" 拆成集合；空串返回 nil（不限）
+// 统一转大写：req.Method 永远是规范大写形式，而 methods 是人工录入的字符串
 func parseMethods(s string) map[string]bool {
 	if strings.TrimSpace(s) == "" {
 		return nil
@@ -260,10 +257,6 @@ func (r *Router) Backends() []*Backend {
 // ReportMetrics 刷新路由级并发水位。
 //
 // 只刷 Gauge（水位），不刷 Counter —— Counter 在拒绝时 +1，不需要轮询。
-//
-// 已知限制：如果两条路由的 path_pattern 相同（不同 host 的同名路径），
-// 它们会写同一个 label 值，后者覆盖前者。V3 范围里不处理
-// （我们的路由 pattern 是唯一的），但要知道有这个边界。
 func (r *Router) ReportMetrics() {
 	entries := r.table.Load().(RouteTable)
 	for _, e := range entries {

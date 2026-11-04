@@ -1,9 +1,3 @@
-// Package runtimeinfo 负责 gateway → Redis 的运行时状态快照上报与读取。
-//
-// 健康检查结果和 AI 配置加载结果都只存在于 gateway 进程内存里，
-// 管理面（admin）不跑这些循环。gateway 每 5 秒把快照写进 Redis，
-// admin 读取后暴露为只读查询接口；key 带 TTL，gateway 挂掉后会自动过期，
-// 管理面因此能把“没有上报”和“上报了但很旧”区分开。
 package runtimeinfo
 
 import (

@@ -43,11 +43,9 @@ func NewUsageStore(pool *pgxpool.Pool) *UsageStore {
 
 // Start 启动后台批量写入；ctx 取消后会先刷完队列再退出。
 func (s *UsageStore) Start(ctx context.Context) {
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
+	s.wg.Go(func() {
 		s.run(ctx)
-	}()
+	})
 }
 
 // Close 等待后台协程退出（调用前必须先取消 Start 传入的 ctx）。

@@ -12,7 +12,6 @@ import (
 )
 
 // OpenAIErrorResponder 返回一个 ErrorResponder：AI 路径回 OpenAI 兼容的错误结构，其余路径回纯文本。
-// 普通代理的调用方看 HTTP 状态码就够了；但 AI 的调用方是 OpenAI SDK ——它按 {"error":{"message":...}} 解析响应，拿到纯文本会抛出一个看不出原因的解析错误（用户看到的是 SDK 自己的报错，而不是真正的原因）。
 func OpenAIErrorResponder(isAI func(*http.Request) bool) ErrorResponder {
 	return func(w http.ResponseWriter, r *http.Request, status int, msg string) {
 		if isAI != nil && isAI(r) {

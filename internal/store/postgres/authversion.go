@@ -15,9 +15,7 @@ type execer interface {
 }
 
 // bumpAuthVersion 递增鉴权配置版本号。
-//
 // gateway 每 3 秒轮询一次；版本号变化 → 清空进程内鉴权缓存。
-// 因此 key 的白名单 / 限额 / 停用、租户状态改动都能在几秒内生效。
 func bumpAuthVersion(ctx context.Context, db execer) error {
 	if _, err := db.Exec(ctx,
 		`UPDATE auth_version SET version = version + 1, updated_at = now() WHERE id = TRUE`); err != nil {

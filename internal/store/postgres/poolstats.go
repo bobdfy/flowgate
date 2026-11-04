@@ -106,16 +106,7 @@ func reportCounters(d poolSnapshot) {
 
 // StartPoolStats 启动连接池采样：每 interval 读一次 pool.Stat() 并上报到 Prometheus。
 //
-// 设计要点：
-//   - 只在 ctx 取消时退出（跟随进程生命周期），不对外暴露 stop 函数，避免调用方忘记关；
-//   - 采样间隔默认 1 秒：劣化发生在秒级，5 秒会漏掉尖峰；而 pool.Stat() 成本极低
-//     （一次加锁读 puddle 的计数），1 秒一次可以忽略不计；
-//   - 池饱和时额外打一条 WARN 日志（带冷却），因为压测时人看的是日志，
-//     等想到去查指标往往已经错过了现场。
-//
-// 用法（在 main 里）：
-//
-//	go postgres.StartPoolStats(ctx, db, time.Second)
+// 后台采样 goroutine 只跟随 ctx 退出、不暴露 stop，默认 1 秒采样一次（因为劣化是秒级且 pool.Stat() 极廉，5 秒会漏尖峰），池饱和时额外打一条带冷却的 WARN 日志。
 func StartPoolStats(ctx context.Context, pool *pgxpool.Pool, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Second
@@ -146,7 +137,7 @@ func StartPoolStats(ctx context.Context, pool *pgxpool.Pool, interval time.Durat
 			prev = cur
 			reportCounters(d)
 
-			// ★ 关键判据：池空等待一出现就说明连接数不够（或连接被长时间占着不放）。
+			// 关键判据：池空等待一出现就说明连接数不够（或连接被长时间占着不放）。
 			if d.emptyAcquireCount > 0 && time.Since(lastWarn) > 10*time.Second {
 				lastWarn = time.Now()
 				slog.Warn("pgxpool_saturated",

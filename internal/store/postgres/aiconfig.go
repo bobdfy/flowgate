@@ -13,10 +13,8 @@ import (
 // ErrAINotFound 表示要改 / 删的 AI 配置记录不存在。
 var ErrAINotFound = errors.New("ai config record not found")
 
-// AIConfigStore 负责 AI provider / model 配置的读写。
-//
+// AIConfigStore 负责 AI provider / model 配置的读写
 // 每次写操作都会在同一事务里把 ai_config_version +1，
-// gateway 侧靠轮询这个版本号决定要不要重建 AI handler。
 type AIConfigStore struct {
 	pool *pgxpool.Pool
 }
@@ -154,7 +152,7 @@ func (s *AIConfigStore) Seed(ctx context.Context, providers []model.AIProvider, 
 	return true, nil
 }
 
-// ---- provider CRUD ----
+// provider CRUD
 
 // ListProviders 返回所有 provider。
 func (s *AIConfigStore) ListProviders(ctx context.Context) ([]model.AIProvider, error) {

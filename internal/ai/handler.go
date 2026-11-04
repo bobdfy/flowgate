@@ -227,8 +227,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
 	if err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			writeError(w, http.StatusRequestEntityTooLarge, ErrTypeInvalidRequest,
 				fmt.Sprintf("请求体超过上限 %d 字节", maxRequestBody))
 			return
@@ -273,7 +272,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 5.15 熔断：上游已经确定不可用时，快速拒绝，别把请求压到一个死掉的上游上。
 	// 放在并发名额之前 —— 熔断中的请求不该再占名额，否则排队等名额的请求
-	// 拿到名额后依然是 503，白白拉高了延迟。
 	lease, breakerOK := h.acquireBreakerSlot(w, r, entry)
 	if !breakerOK {
 		return
@@ -283,8 +281,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer lease.Done(loadbalance.OutcomeNeutral)
 
 	// 5.2 模型级并发名额：覆盖整条请求（含整条 SSE）。
-	// 必须在这里 defer —— 放在 forward() 里会在拿到响应头时就归还，
-	// 那时流还没开始读，上限等于没设。
+	// 必须在这里 defer —— 放在 forward() 里会在拿到响应头时就归还
 	release, slotOK := h.acquireModelSlot(w, r, req.Model)
 	if !slotOK {
 		return
@@ -334,8 +331,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 7. 模型别名 / 灰度。失败只记 warn，继续用原 body ——
-	// 别因为一个优化把请求打挂。
+	// 7. 模型别名 / 灰度。失败只记 warn，继续用原 body —— 别因为一个优化把请求打挂。
 	if entry.UpstreamModel != "" && entry.UpstreamModel != req.Model {
 		if rewritten, rerr := rewriteModel(body, entry.UpstreamModel); rerr == nil {
 			body = rewritten
@@ -359,7 +355,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// TPM 预扣: 转发前先占额度，避免并发下集体穿透
+	// 9. TPM 预扣: 转发前先占额度，避免并发下集体穿透
 	var settler *tpmSettler
 	if h.tpm != nil {
 		if id, ok := identity.FromContext(r.Context()); ok {
@@ -393,19 +389,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 9. 发上游请求。
+	// 10. 发上游请求。
 	resp, err := h.forward(r, entry, apiName, header, body, streaming)
 	if err != nil {
-		// 客户端取消记中性：用户走了不代表上游不可用（P0-12）。
+		// 客户端取消记中性：用户走了不代表上游不可用（P0-12）
 		lease.Done(classifyForwardError(err))
 
-		// C8：客户端主动取消时连接已断开，回写无意义，别把取消误报成非标准 499。
+		// 客户端主动取消时连接已断开，回写无意义，别把取消误报成非标准 499
 		if errors.Is(err, context.Canceled) {
 			slog.Info("ai_forward_canceled",
 				"model", req.Model, "provider", entry.Name, "api", string(apiName))
 			return
 		}
 		status, errType := classifyUpstreamError(err)
+
 		kind := errorlog.KindUpstream
 		if status == http.StatusGatewayTimeout {
 			kind = errorlog.KindTimeout
@@ -420,7 +417,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// 10~11. 输出。
+	// 11. 输出
 	if streaming {
 		// 流式要等整条流结束才能判定上游是否真的健康
 		// （200 之后中途断流同样算故障），所以结算在 serveStream 内部完成。
@@ -507,8 +504,8 @@ func (h *Handler) serveBuffered(w http.ResponseWriter, resp *http.Response, mode
 	return cr.Usage
 }
 
-// serveStream 处理流式响应：交给注入的 SSE 转发器。
-// rec 不为 nil 时，把流式统计写回去（prompt/completion 可能是估算值）。
+// serveStream 处理流式响应：交给注入的 SSE 转发器
+// rec 不为 nil 时，把流式统计写回去（prompt/completion 可能是估算值）
 //
 // 返回值是本次流对熔断器的结算结果：200 之后中途断流同样算上游故障，
 // 所以判定必须放在这里，而不是拿到响应头的那一刻。
@@ -568,7 +565,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 		}
 
 		// 只有「上游不说话」和「上游把流截断」算可用性故障。
-		// 客户端自己走、或撞到我们配置的最大时长，都不能怪上游。
+		// 客户端自己走、或撞到我们配置的最大时长，都不能怪上游
 		outcome = loadbalance.OutcomeFailure
 		switch reason {
 		case "client_cancel", "max_duration":
@@ -577,6 +574,7 @@ func (h *Handler) serveStream(w http.ResponseWriter, r *http.Request, resp *http
 	} else {
 		observability.AIStreamTerminatedTotal.WithLabelValues("normal").Inc()
 	}
+
 	if settler != nil {
 		settler.Settle(usage.actual())
 	}
@@ -653,13 +651,13 @@ func (h *Handler) forward(r *http.Request, entry *ProviderEntry, apiName ApiName
 		}
 	}
 
-	// 显式设长度：bytes.NewReader 已经能让包自动推出来，
+	// 显式设长度：bytes.NewReader 已经能让包自动推出来
 	req.ContentLength = int64(len(body))
 
 	if streaming {
 		req.Header.Set("Accept", "text/event-stream")
 
-		// C5：显式设 identity 才能真正禁用压缩 —— http.Transport 在 header 缺省时会自动补 gzip。
+		// 显式设 identity 才能真正禁用压缩 —— http.Transport 在 header 缺省时会自动补 gzip。
 		req.Header.Set("Accept-Encoding", "identity")
 
 	} else {

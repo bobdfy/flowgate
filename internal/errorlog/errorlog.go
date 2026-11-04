@@ -99,13 +99,6 @@ func Signature(e Entry) string {
 }
 
 // ResetLegacy 清理版本升级遗留的 key 类型冲突。
-//
-// 旧版本把错误存在 Redis LIST 里（LPUSH / LTRIM）。新版本改成 ZSET（签名索引）
-// + 两个 HASH；旧 key 还在的话，ZADD / HINCRBY 会对它一律返回 WRONGTYPE，
-// 看板从此空白，而且只在 flowgate_errorlog_dropped_total 上留痕，很难联想到原因。
-// 窗口本身是易失数据（最多 500 种、TTL 24h），类型不对就直接删掉重建。
-//
-// gateway 启动时调用一次；key 不存在或类型正确时是空操作。
 func ResetLegacy(ctx context.Context, rdb *redis.Client, key string) error {
 	for _, k := range []string{key, key + countSuffix, key + metaSuffix} {
 		typ, err := rdb.Type(ctx, k).Result()

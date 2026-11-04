@@ -39,7 +39,6 @@ func FromContext(ctx context.Context) (*Identity, bool) {
 //
 // 发放 key（admin）和校验 key（gateway 鉴权）必须用同一个算法：
 // 库里只存哈希、不存明文，两边的算法一旦漂移，所有已发放的 key 立刻全部失效。
-// 所以这个函数只在这里实现一份，别处一律调它。
 func HashKey(key string) string {
 	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:])

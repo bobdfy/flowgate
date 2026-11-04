@@ -56,6 +56,7 @@ func (f *Framer) Frame(chunk []byte) (events [][]byte) {
 		} else {
 			event = s.sliceRange(prev, end)
 		}
+
 		events = append(events, normalizeEvent(event))
 		prev = end
 	}
@@ -168,8 +169,7 @@ func (s sseByteWindow) scanEventEnds(limit int) []int {
 	return ends
 }
 
-// sliceRange 返回 w[from:to] 的一份新拷贝，用于保留的 tail、
-// RESYNC 的 carry，以及跨边界的事件。
+// sliceRange 返回 w[from:to] 的一份新拷贝，用于保留的 tail、RESYNC 的 carry，以及跨边界的事件。
 func (s sseByteWindow) sliceRange(from, to int) []byte {
 	out := make([]byte, 0, to-from)
 	if from >= len(s.a) {
@@ -215,8 +215,8 @@ func normalizeEvent(ev []byte) []byte {
 		out = ev
 	}
 
-	// 剥掉末尾的空行（分隔符）。一个事件可能以 \n\n 结束，
-	// 剥干净后尾部不该残留换行 —— 调用方写出时要自己补回 \n\n。
+	// 剥掉末尾的空行（分隔符）。
+	// 一个事件可能以 \n\n 结束，剥干净后尾部不该残留换行 —— 调用方写出时要自己补回 \n\n。
 	for len(out) > 0 && (out[len(out)-1] == '\n') {
 		out = out[:len(out)-1]
 	}

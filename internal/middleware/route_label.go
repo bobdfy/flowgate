@@ -31,10 +31,6 @@ func RouteLabel(ctx context.Context) string {
 }
 
 // SetRouteLabel 由内层（路由匹配 / 鉴权 / 限流 / AI 分流）写入标签，供 Logging 打点。
-//
-// 为什么是「写 ctx 里的可变持有者」而不是直接 Values：
-// Logging 在外层，只有内层知道这次请求命中了哪条路由，
-// context 的值只能向下传，所以需要一个内层能写、外层能读的容器。
 func SetRouteLabel(r *http.Request, label string) {
 	if h, ok := r.Context().Value(routeLabelKey{}).(*routeLabel); ok {
 		h.value = label

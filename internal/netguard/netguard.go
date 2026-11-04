@@ -1,12 +1,3 @@
-// Package netguard 负责 SSRF 防护：判断某个目标地址是否允许网关去连接。
-//
-// ★ 为什么要分成「解析期」和「拨号期」两层：
-// 配置期只检查一次（admin 保存节点时），但 DNS 是可变的 ——
-// 检查时 example.com 解析到公网 IP，网关真正拨号时可能已经指向 127.0.0.1
-// （DNS rebinding）。所以最终防线必须放在连接建立的那一刻，
-// 校验的就是马上就要连的那个 IP，中间没有可乘之机。
-//
-// 本包不碰业务，只做「IP 是否允许」这一件事，admin 和 gateway 共用同一份规则。
 package netguard
 
 import (
@@ -20,7 +11,6 @@ import (
 )
 
 // extraBlocked 是标准库 IsPrivate 没覆盖、但同样不能拨的网段。
-
 var extraBlocked = []*net.IPNet{
 	mustCIDR("0.0.0.0/8"),     // IsUnspecified 只认 0.0.0.0 本身，0.0.0.1 之类的同样不可路由
 	mustCIDR("100.64.0.0/10"), // 运营商级 NAT（CGNAT），部分云厂商拿它当内部网络。

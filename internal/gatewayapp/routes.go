@@ -66,7 +66,7 @@ func (m *RouteManager) Load() (int64, gateway.RouteTable, error) {
 		return 0, nil, err
 	}
 
-	// BuildRoutes 会就地增删 pools 里的节点池，必须独占。
+	// BuildRoutes 会就地增删 pools 里的节点池，必须独占
 	m.mu.Lock()
 	table, err := gateway.BuildRoutes(items, m.cache, m.pools)
 	m.mu.Unlock()

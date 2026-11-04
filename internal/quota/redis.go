@@ -95,9 +95,6 @@ func (rt *RedisTPM) Window() time.Duration {
 }
 
 // SetWindow 热切换窗口长度。window <= 0 回落到 1 分钟，小于 1 秒按 1 秒处理。
-//
-// 切换只影响之后的新请求；旧窗口的 Redis key 按 TTL 自然回收，
-// 在途请求的结算用的是 Reserve 时记下的 key，不会记到新窗口里。
 func (rt *RedisTPM) SetWindow(window time.Duration) {
 	if window <= 0 {
 		window = time.Minute

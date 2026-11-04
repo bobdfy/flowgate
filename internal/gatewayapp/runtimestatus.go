@@ -15,13 +15,7 @@ import (
 // 供管理面的只读接口（/api/v1/runtime/*）查询。
 //
 // pools 是快照函数而不是 map 本身：路由刷新会并发修改 map，拿快照更安全。
-func PublishRuntimeStatus(
-	ctx context.Context,
-	rdb *redis.Client,
-	instance string,
-	pools func() map[int64]*loadbalance.NodePool,
-	aiStatus func() model.AIRuntimeStatus,
-) {
+func PublishRuntimeStatus(ctx context.Context, rdb *redis.Client, instance string, pools func() map[int64]*loadbalance.NodePool, aiStatus func() model.AIRuntimeStatus) {
 	ticker := time.NewTicker(runtimeinfo.PublishInterval)
 	defer ticker.Stop()
 

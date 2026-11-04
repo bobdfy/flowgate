@@ -87,11 +87,10 @@ func (b *TokenBucket) refillLocked() {
 type LocalLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]*bucketEntry
-	//rate    float64 删除, rate由 Allow 传入, 每个桶不同
-	burst  float64
-	now    func() time.Time
-	idle   time.Duration // 空闲多久的桶会被清理
-	lastGC time.Time
+	burst   float64
+	now     func() time.Time
+	idle    time.Duration // 空闲多久的桶会被清理
+	lastGC  time.Time
 }
 
 type bucketEntry struct {

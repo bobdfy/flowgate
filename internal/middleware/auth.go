@@ -47,7 +47,6 @@ func NewAuthenticatorWithCache(keys keyLookup, ttl time.Duration) *Authenticator
 
 // InvalidateCache 清空进程内鉴权缓存。
 // gateway 轮询到 auth_version 变化时调用，让 key 白名单 / 租户限额改动立即生效；
-// 缓存未启用时是空操作。
 func (a *Authenticator) InvalidateCache() {
 	a.cache.clear()
 }

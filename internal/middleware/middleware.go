@@ -72,23 +72,19 @@ func methodLabel(m string) string {
 }
 
 // Logging 记录每个请求的方法、路径、状态码和耗时（结构化，与网关其他日志统一）。
-//
-// 指标标签用「路由模板」而不是原始路径：路径由客户端控制，
-// 直接当标签会让随机 URL 不断造出新的时间序列，把 Prometheus 打爆。
-// 日志里保留原始 path（日志没有基数问题），另加 route 字段便于对照。
 func Logging(next http.Handler) http.Handler {
 	return LoggingWithErrors(nil, "", next)
 }
 
 // LoggingWithErrors 同 Logging，并把失败请求交给 sink（nil = 不记录错误看板）。
 //
-// instance 用于标识条目来自哪个 gateway 实例：多实例共用一个 Redis 列表，
-// 没有这个字段就看不出是哪台出的问题。
+// instance 用于标识条目来自哪个 gateway 实例：多实例共用一个 Redis 列表
 func LoggingWithErrors(sink ErrorSink, instance string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		// 内层（路由 / 鉴权 / 限流 / AI 分流）把命中的有界标签写进这个持有者
 		r = r.WithContext(withRouteLabel(r.Context()))
+
 		if sink != nil {
 			// 内层可以把「为什么失败」写进这个持有者（熔断 / 流中断 / 超时），
 			// 外层据此归类，而不是只看状态码。

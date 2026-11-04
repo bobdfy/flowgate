@@ -1,12 +1,3 @@
-// Package logsink 提供一个并发安全的日志输出通道。
-//
-// 背景：日志 handler 会被所有请求 goroutine 并发调用，而 bufio.Writer
-// 不是并发安全的。这里把「写」与「落盘」拆开：
-//
-//   - 调用方（Write）只做一次拷贝 + 非阻塞入队，永远不等待 I/O；
-//   - 单个后台 goroutine 独占 bufio.Writer，负责批量写与定时 Flush。
-//
-// 队列满或 sink 已关闭时直接丢弃并计数，保证日志系统不会反向拖慢业务路径。
 package logsink
 
 import (

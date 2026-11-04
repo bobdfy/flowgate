@@ -42,8 +42,7 @@ type aiModelConfig struct {
 	Provider      string // 引用 aiProviderConfig.Name
 	UpstreamModel string // 发给上游的真实模型名
 
-	// MaxConcurrency 是这个模型的在途请求上限，0 = 不限。
-	MaxConcurrency int
+	MaxConcurrency int // MaxConcurrency 是这个模型的在途请求上限，0 = 不限。
 }
 
 // aiConfig 是 AI Gateway 的完整配置。
@@ -181,7 +180,9 @@ func NewAIRuntime(ctx context.Context, cfg AIConfig, tpm quota.Limiter, store *p
 	rt := &AIRuntime{store: store, tpm: tpm, usage: usage, clients: ai.NewClients(policy, t)}
 
 	rt.handler.Store(buildAIHandler(cfg, rt.tpm, rt.usage, rt.clients))
+
 	rt.status.Enabled = cfg.Enabled
+
 	if cfg.Enabled && len(cfg.Models) > 0 {
 		now := time.Now().UTC()
 		rt.status.LoadedAt = &now
@@ -459,6 +460,7 @@ func buildAIHandler(cfg AIConfig, tpm quota.Limiter, usage *postgres.UsageStore,
 	}
 
 	slog.Info("ai_gateway_enabled", "model_count", len(entries))
+
 	h := ai.NewHandler(entries, clients)
 	h.SetTPM(tpm)
 	if usage != nil {
@@ -470,9 +472,6 @@ func buildAIHandler(cfg AIConfig, tpm quota.Limiter, usage *postgres.UsageStore,
 // AIRouter 按路径分流：命中的 AI 路径走当前 handler，其余交给 fallback。
 //
 // handler 用 getter 传入，这样配置热更新时无需重建中间件链。
-//
-//	RequestID → Logging → RequireAuth → RateLimit(租户) → RateLimit(key)
-//	  →  分流 → AI / 普通代理
 func AIRouter(get func() *ai.Handler, fallback http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if name, ok := ai.ApiNameFromPath(r.Method, r.URL.Path); ok {

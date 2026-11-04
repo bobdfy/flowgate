@@ -1,7 +1,5 @@
 package gatewayapp
 
-// 运行时设置的轮询与热切换（目前只有 TPM 窗口）
-
 import (
 	"context"
 	"log/slog"
@@ -27,10 +25,7 @@ func ResolveTPMWindow(ctx context.Context, store *postgres.SettingsStore, fallba
 		return time.Duration(secs) * time.Second, "database"
 	}
 
-	seed := int(fallback / time.Second)
-	if seed < 1 {
-		seed = 1
-	}
+	seed := max(int(fallback/time.Second), 1)
 	if _, err := store.SetTPMWindow(ctx, seed); err != nil {
 		slog.Warn("tpm_window_seed_failed", "err", err)
 		return fallback, "flag"
@@ -40,14 +35,12 @@ func ResolveTPMWindow(ctx context.Context, store *postgres.SettingsStore, fallba
 }
 
 // WatchTPMWindow 每 3 秒读一次数据库，窗口变化时热切换并重新发布到 Redis。
-//
-// 切换对在途请求安全：Reserve 返回的 Reservation 里带 key，
-// Settle 用的还是旧窗口的 key，不会把旧请求算进新窗口。
 func WatchTPMWindow(ctx context.Context, store *postgres.SettingsStore, tpm *quota.RedisTPM) {
 	ticker := time.NewTicker(tpmWindowPollInterval)
 	defer ticker.Stop()
 
 	current := tpm.Window()
+
 	// 0 保证第一轮必发布一次，顺带补上启动时发布失败的情况。
 	var published time.Duration
 
