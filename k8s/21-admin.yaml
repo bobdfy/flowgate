@@ -18,7 +18,7 @@ spec:
         - name: admin
           image: flowgate-admin:latest
           imagePullPolicy: IfNotPresent
-          args: ["-addr", ":8092"]
+          args: ["-addr", ":8092", "-web-dir", "/app/web"]
           ports:
             - containerPort: 8092
           env:

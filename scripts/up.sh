@@ -56,14 +56,6 @@ fi
 
 compose() { "${COMPOSE[@]}" -f "$COMPOSE_FILE" "$@"; }
 
-# compose 里 gateway/admin 都写了 env_file: ../.env。文件不存在时 compose
-# 报的是「env file not found」，和真正的故障原因（没配上游 key）差得很远。
-[[ -f "$ROOT/.env" ]] || die "缺少 $ROOT/.env（至少需要 REDIS_PASSWORD=flowgate 和上游 key）"
-
-if [[ ! -f "$ROOT/web/dist/index.html" ]]; then
-  warn "web/dist 不存在，admin 会跳过控制台静态托管（需要时：cd web && pnpm install && pnpm build）"
-fi
-
 # ---- 停栈模式 -------------------------------------------------------------
 
 case "$MODE" in
@@ -82,6 +74,12 @@ case "$MODE" in
 esac
 
 # ---- 启动 -----------------------------------------------------------------
+
+# compose 里 gateway/admin 都写了 env_file: ../.env。文件不存在时 compose
+# 报的是「env file not found」，和真正的故障原因（没配管理凭据）差得很远。
+[[ -f "$ROOT/.env" ]] || die "缺少 $ROOT/.env。先执行 cp .env.example .env，并设置 ADMIN_KEY"
+# admin 以 :8092（非回环）启动，ADMIN_KEY 为空会直接拒绝启动。
+grep -Eq '^ADMIN_KEY=.+' "$ROOT/.env" || die "ADMIN_KEY 未设置。在 $ROOT/.env 里填一个随机值：openssl rand -hex 32"
 
 if [[ $BUILD -eq 1 ]]; then
   step "构建镜像并启动（首次约 1~2 分钟）"

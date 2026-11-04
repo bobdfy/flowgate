@@ -1,2 +1,7 @@
 .git
 .env
+.env.*
+web/node_modules
+web/dist
+web/.env.local
+docs

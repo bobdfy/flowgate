@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS ai_usage (
     status_code       INT         NOT NULL DEFAULT 0,
     streaming         BOOLEAN     NOT NULL DEFAULT FALSE,
     duration_ms       INT         NOT NULL DEFAULT 0,
+    ttft_ms           INT         NOT NULL DEFAULT 0,       -- 首 token 耗时；非流式恒为 0
     request_id        TEXT        NOT NULL DEFAULT '',
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -222,6 +222,7 @@ ai.yaml           首次启动的 AI 配置种子（之后以 DB 为准）
 ### 方式一：Docker 全容器（推荐）
 
 ```bash
+cp .env.example .env           # 填 ADMIN_KEY（openssl rand -hex 32），真实模型再填上游 key
 bash scripts/up.sh              # 构建镜像 → 启动 → 等到 /readyz 通过 → 打印入口
 bash scripts/up.sh --no-build   # 只重启，不重建镜像（改了 Go 代码不要用）
 bash scripts/up.sh --down       # 停栈，保留数据卷
@@ -240,8 +241,8 @@ bash scripts/up.sh --clean      # 停栈并删除数据卷（配置与版本历�
 | gateway | 8090 / 9090 | 数据面 / metrics |
 | admin | 8092 | 管理面 |
 
-管理控制台由 admin 同端口托管：先在 `web/` 执行 `pnpm install && pnpm build`，
-产物 `web/dist` 挂载进 admin，然后打开 <http://127.0.0.1:8092/>。
+管理控制台由 admin 同端口托管，前端产物已在镜像构建阶段生成（`/app/web`），
+启动后直接打开 <http://127.0.0.1:8092/>。
 开发模式仍用 `cd web && pnpm dev`（5173，`/api` 代理到 8092，支持热更新）。
 
 手动核对：`docker compose -f deploy/docker-compose.yml ps`（四个都 Up）；查表

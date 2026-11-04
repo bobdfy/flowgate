@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS ai_models (
         REFERENCES ai_providers(name) ON UPDATE CASCADE ON DELETE CASCADE,
     upstream_model VARCHAR(128) NOT NULL DEFAULT '',
     enabled        BOOLEAN     NOT NULL DEFAULT true,
+    -- 模型级并发上限（0 = 不限）。避免某个模型的慢流占满全局实例级名额。
+    max_concurrency INT NOT NULL DEFAULT 0,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );

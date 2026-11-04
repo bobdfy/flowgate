@@ -5,7 +5,7 @@
 
 -- 1. gateway_services —— 上游服务
 --    一组提供相同功能的实例的统称，例如 user-service。
-CREATE TABLE gateway_services (
+CREATE TABLE IF NOT EXISTS gateway_services (
     id                 BIGSERIAL PRIMARY KEY,                     -- 服务 ID
     name               VARCHAR(255) NOT NULL UNIQUE,              -- 服务名，全局唯一
     protocol           VARCHAR(20)  NOT NULL DEFAULT 'http',      -- 协议：http / grpc
@@ -33,7 +33,7 @@ CREATE TABLE gateway_services (
 
 -- 2. upstream_nodes —— 上游实例
 --    一个服务下的具体地址，一个服务可以有多个实例。
-CREATE TABLE upstream_nodes (
+CREATE TABLE IF NOT EXISTS upstream_nodes (
     id           BIGSERIAL PRIMARY KEY,
     service_id   BIGINT       NOT NULL REFERENCES gateway_services(id) ON DELETE CASCADE, -- 属于哪个服务
     address      VARCHAR(255) NOT NULL,                -- 地址，如 localhost:8091
@@ -46,7 +46,7 @@ CREATE TABLE upstream_nodes (
 
 -- 3. gateway_routes —— 路由
 --    决定哪个路径转发到哪个服务。
-CREATE TABLE gateway_routes (
+CREATE TABLE IF NOT EXISTS gateway_routes (
     id              BIGSERIAL PRIMARY KEY,
     service_id      BIGINT       NOT NULL REFERENCES gateway_services(id), -- 转发到哪个服务
     name            VARCHAR(255) NOT NULL,          -- 路由名
@@ -63,7 +63,7 @@ CREATE TABLE gateway_routes (
 
 -- 4. route_versions —— 配置版本
 --    配置的"版本化"，每次发布生成一个新版本，可回滚。
-CREATE TABLE route_versions (
+CREATE TABLE IF NOT EXISTS route_versions (
     id           BIGSERIAL PRIMARY KEY,
     version      INTEGER      NOT NULL UNIQUE,          -- 版本号，递增
     status       VARCHAR(20)  NOT NULL DEFAULT 'draft', -- 状态：draft（草稿）/ published（已发布）
@@ -74,7 +74,7 @@ CREATE TABLE route_versions (
 
 -- 5. route_version_items —— 版本条目
 --    冻结某个版本里的资源快照，保证发布后不受后续草稿修改影响。
-CREATE TABLE route_version_items (
+CREATE TABLE IF NOT EXISTS route_version_items (
     id                BIGSERIAL PRIMARY KEY,
     version_id        BIGINT      NOT NULL REFERENCES route_versions(id) ON DELETE CASCADE, -- 属于哪个版本
     resource_type     VARCHAR(20) NOT NULL,     -- 资源类型：service / node / route
@@ -83,25 +83,26 @@ CREATE TABLE route_version_items (
 );
 
 -- 索引：加速按服务查实例、按版本查条目
-CREATE INDEX idx_upstream_nodes_service_id ON upstream_nodes(service_id);
-CREATE INDEX idx_gateway_routes_service_id ON gateway_routes(service_id);
-CREATE INDEX idx_route_version_items_version_id ON route_version_items(version_id);
-CREATE INDEX idx_route_versions_status_version ON route_versions(status, version);
+CREATE INDEX IF NOT EXISTS idx_upstream_nodes_service_id ON upstream_nodes(service_id);
+CREATE INDEX IF NOT EXISTS idx_gateway_routes_service_id ON gateway_routes(service_id);
+CREATE INDEX IF NOT EXISTS idx_route_version_items_version_id ON route_version_items(version_id);
+CREATE INDEX IF NOT EXISTS idx_route_versions_status_version ON route_versions(status, version);
 
 
--- 1. tenants —— 租户
+-- 6. tenants —— 租户
 --    限流、配额、用量归属的基本单位。
-CREATE TABLE tenants (
+CREATE TABLE IF NOT EXISTS tenants (
     id         BIGSERIAL PRIMARY KEY,
     name       VARCHAR(255) NOT NULL UNIQUE,             -- 租户名，唯一
     status     VARCHAR(20)  NOT NULL DEFAULT 'active',   -- active / disabled
     created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    qps_limit INTEGER NOT NULL DEFAULT 100
+    qps_limit INTEGER NOT NULL DEFAULT 100,
+    tpm_limit BIGINT  NOT NULL DEFAULT 100000          -- 每分钟 token 上限
 );
 
--- 2. api_keys —— 租户的 API Key
+-- 7. api_keys —— 租户的 API Key
 --    一个租户可以有多个 Key（不同用途、不同环境）。
-CREATE TABLE api_keys (
+CREATE TABLE IF NOT EXISTS api_keys (
     id           BIGSERIAL PRIMARY KEY,
     tenant_id    BIGINT       NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, 
                                                     -- 属于哪个租户
@@ -111,8 +112,10 @@ CREATE TABLE api_keys (
     expires_at   TIMESTAMPTZ,                       -- 过期时间；NULL = 永不过期
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
     last_used_at TIMESTAMPTZ,                       -- 最后使用时间（低频更新）
-    qps_limit INTEGER NOT NULL DEFAULT 100
+    qps_limit INTEGER NOT NULL DEFAULT 100,
+    -- 模型白名单；空数组 = 不限制（兼容已有 key）
+    allowed_models TEXT[] NOT NULL DEFAULT '{}'
 );
 
 -- 索引：按租户查它的所有 Key
-CREATE INDEX idx_api_keys_tenant_id ON api_keys(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_tenant_id ON api_keys(tenant_id);

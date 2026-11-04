@@ -26,6 +26,7 @@ go.work.sum
 # ===== 环境变量 / 密钥 =====
 .env
 .env.*
+!/.env.example
 *.local
 
 # ===== IDE / 编辑器 =====
